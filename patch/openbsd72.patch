@@ -1,0 +1,96 @@
+diff --git a/sys/conf/GENERIC b/sys/conf/GENERIC
+index b524e4c00..635c51ad3 100644
+--- a/sys/conf/GENERIC
++++ b/sys/conf/GENERIC
+@@ -42,6 +42,7 @@ option		MSDOSFS		# MS-DOS file system
+ option		FIFO		# FIFOs; RECOMMENDED
+ #option		TMPFS		# efficient memory file system
+ option		FUSE		# FUSE
++option		HAMMER2		# HAMMER2 file system
+ 
+ option		SOCKET_SPLICE	# Socket Splicing for TCP and UDP
+ option		TCP_ECN		# Explicit Congestion Notification for TCP
+diff --git a/sys/conf/files b/sys/conf/files
+index 3bd32d693..2e3a09ee8 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -788,6 +788,7 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
+ file tmpfs/tmpfs_vnops.c		tmpfs
+ file tmpfs/tmpfs_specops.c		tmpfs
+ file tmpfs/tmpfs_fifoops.c		tmpfs & fifo
++file hammer2/hammer2_vfsops.c		hammer2
+ file net/art.c
+ file net/bpf.c				bpfilter		needs-count
+ file net/bpf_filter.c			bpfilter
+diff --git a/sys/kern/vfs_init.c b/sys/kern/vfs_init.c
+index 84c00f0e4..59715d5d8 100644
+--- a/sys/kern/vfs_init.c
++++ b/sys/kern/vfs_init.c
+@@ -100,6 +100,11 @@ static struct vfsconf vfsconflist[] = {
+ 	{ &tmpfs_vfsops, MOUNT_TMPFS, 19, 0, MNT_LOCAL,
+ 	    sizeof(struct tmpfs_args) },
+ #endif
++
++#ifdef HAMMER2
++	{ &hammer2_vfsops, "hammer2", 20, 0, MNT_LOCAL,
++	    sizeof(struct hammer2_args) },
++#endif
+ };
+ 
+ 
+diff --git a/sys/sys/mount.h b/sys/sys/mount.h
+index 40c12e976..c31e7c17c 100644
+--- a/sys/sys/mount.h
++++ b/sys/sys/mount.h
+@@ -257,6 +257,15 @@ struct fusefs_args {
+ 	int allow_other;
+ };
+ 
++/*
++ * Arguments to mount HAMMER2 file systems
++ * XXX sizeof can't exceed existing union mount_info size.
++ */
++struct hammer2_args {
++	char		volume[100];	/* was 1024, change this to pointer */
++	int		hflags;		/* extended hammer2 mount flags */
++};
++
+ /*
+  * file system statistics
+  */
+@@ -273,6 +282,7 @@ union mount_info {
+ 	struct msdosfs_args msdosfs_args;
+ 	struct ntfs_args ntfs_args;
+ 	struct tmpfs_args tmpfs_args;
++	struct hammer2_args hammer2_args;
+ 	char __align[160];	/* 64-bit alignment and room to grow */
+ };
+ 
+@@ -558,6 +568,7 @@ extern	const struct vfsops ntfs_vfsops;
+ extern	const struct vfsops udf_vfsops;
+ extern	const struct vfsops fusefs_vfsops;
+ extern	const struct vfsops tmpfs_vfsops;
++extern	const struct vfsops hammer2_vfsops;
+ 
+ #include <net/radix.h>
+ #include <sys/socket.h>		/* XXX for AF_MAX */
+diff --git a/sys/sys/vnode.h b/sys/sys/vnode.h
+index c9bb267e7..4b6aebca0 100644
+--- a/sys/sys/vnode.h
++++ b/sys/sys/vnode.h
+@@ -66,13 +66,13 @@ enum vtype	{ VNON, VREG, VDIR, VBLK, VCHR, VLNK, VSOCK, VFIFO, VBAD };
+ enum vtagtype	{
+ 	VT_NON, VT_UFS, VT_NFS, VT_MFS, VT_MSDOSFS,
+ 	VT_PORTAL, VT_PROCFS, VT_AFS, VT_ISOFS, VT_ADOSFS,
+-	VT_EXT2FS, VT_VFS, VT_NTFS, VT_UDF, VT_FUSEFS, VT_TMPFS,
++	VT_EXT2FS, VT_VFS, VT_NTFS, VT_UDF, VT_FUSEFS, VT_TMPFS, VT_HAMMER2,
+ };
+ 
+ #define	VTAG_NAMES \
+     "NON", "UFS", "NFS", "MFS", "MSDOSFS",			\
+     "unused", "unused", "unused", "ISOFS", "unused",		\
+-    "EXT2FS", "VFS", "NTFS", "UDF", "FUSEFS", "TMPFS"
++    "EXT2FS", "VFS", "NTFS", "UDF", "FUSEFS", "TMPFS", "HAMMER2"
+ 
+ /*
+  * Each underlying filesystem allocates its own private area and hangs
