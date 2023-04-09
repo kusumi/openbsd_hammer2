@@ -38,6 +38,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/sysctl.h>
+#include <sys/mount.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,7 @@
 
 #include <fs/hammer2/hammer2_disk.h>
 #include <fs/hammer2/hammer2_xxhash.h>
+#include <fs/hammer2/hammer2_mount.h>
 
 #include "mkfs_hammer2.h"
 #include "hammer2_subs.h"
@@ -62,17 +64,57 @@ static void alloc_direct(hammer2_off_t *basep, hammer2_blockref_t *bref,
 				size_t bytes);
 
 static int
+get_hammer2_supported_version(int *version)
+{
+	struct vfsconf vfsc;
+	int mib[4], hammer2_id;
+	size_t len;
+
+	mib[0] = CTL_VFS;
+	mib[1] = VFS_GENERIC;
+	mib[2] = VFS_MAXTYPENUM;
+	len = sizeof(hammer2_id);
+	if (sysctl(mib, 3, &hammer2_id, &len, NULL, 0)) {
+		perror("sysctl");
+		return(1);
+	}
+
+	for (; hammer2_id; hammer2_id--) {
+		mib[0] = CTL_VFS;
+		mib[1] = VFS_GENERIC;
+		mib[2] = VFS_CONF;
+		mib[3] = hammer2_id;
+		len = sizeof(vfsc);
+		if (sysctl(mib, 4, &vfsc, &len, NULL, 0))
+			continue;
+
+		if (!strcmp(vfsc.vfc_name, MOUNT_HAMMER2))
+			break;
+	}
+	if (hammer2_id <= 0) {
+		fprintf(stderr, "Cannot find HAMMER2 filesystem id\n");
+		return(1);
+	}
+
+	mib[0] = CTL_VFS;
+	mib[1] = hammer2_id;
+	mib[2] = HAMMER2CTL_SUPPORTED_VERSION;
+	len = sizeof(*version);
+	if (sysctl(mib, 3, version, &len, NULL, 0)) {
+		perror("sysctl");
+		return(1);
+	}
+
+	return(0);
+}
+
+static int
 get_hammer2_version(void)
 {
 	int version = HAMMER2_VOL_VERSION_DEFAULT;
 	size_t olen = sizeof(version);
-#if 0
-	/* XXX2 */
-	if (sysctlbyname("vfs.hammer2.supported_version",
-			 &version, &olen, NULL, 0) == 0) {
-#else
-	if (1) {
-#endif
+
+	if (get_hammer2_supported_version(&version) == 0) {
 		if (version >= HAMMER2_VOL_VERSION_WIP) {
 			version = HAMMER2_VOL_VERSION_WIP - 1;
 			fprintf(stderr,

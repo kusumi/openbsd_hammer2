@@ -271,7 +271,7 @@ check_volume(int fd)
 		 * can be as small as HAMMER2_LOGSIZE (16KB).
 		 */
 		int media_blksize = dl.d_secsize;
-		size = ((hammer2_off_t)dl.d_secperunit) * media_blksize;
+		size = (hammer2_off_t)dl.d_secperunit * media_blksize;
 		if (media_blksize > HAMMER2_PBUFSIZE ||
 		    HAMMER2_PBUFSIZE % media_blksize) {
 			errx(1, "A media sector size of %d is not supported",

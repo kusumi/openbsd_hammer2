@@ -3,7 +3,7 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 ## About
 
-+ HAMMER2 file system for OpenBSD (read-only support)
++ HAMMER2 file system for OpenBSD (currently read-only support)
 
 + OpenBSD version of https://github.com/kusumi/netbsd_hammer2
 
@@ -18,6 +18,19 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 + OpenBSD src tree under /usr/src
 
 + Bash
+
+## OpenBSD build
+
+1. Apply [patch/openbsd72.patch](patch/openbsd72.patch) against /usr/src.
+
+2. Run *make prep* to create symlinks under /usr/src/sys which point to this repository. Run *make unprep* to undo.
+
+        $ cd openbsd_hammer2
+        $ make prep
+
+3. Build and install /usr/src/sys.
+
+4. Build and install /usr/src/sbin/sysctl.
 
 ## Build
 
@@ -34,20 +47,7 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
         $ cd openbsd_hammer2
         $ make uninstall
 
-## OpenBSD kernel build
-
-+ Apply [patch/openbsd72.patch](patch/openbsd72.patch) or equivalent diff against /usr/src.
-
-+ Run *make prep* to create a symlink under /usr/src/sys which points to this repository. Run *make unprep* to undo.
-
-        $ cd openbsd_hammer2
-        $ make prep
-
-+ Build and install /usr/src/sys.
-
 ## Notes
-
-+ Only read-only support is planned for OpenBSD.
 
 + Tags are merely for packaging, nothing directly to do with file system version.
 

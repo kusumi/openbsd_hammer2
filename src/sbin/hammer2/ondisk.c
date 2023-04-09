@@ -217,7 +217,7 @@ hammer2_add_volume(const char *path, int rdonly)
 
 	if (fstat(fd, &st) == -1)
 		err(1, "fstat");
-	if (!S_ISBLK(st.st_mode) && !S_ISREG(st.st_mode))
+	if (!S_ISBLK(st.st_mode) && !S_ISCHR(st.st_mode) && !S_ISREG(st.st_mode))
 		errx(1, "Unsupported file type");
 
 	if (hammer2_read_volume_header(fd, path, &voldata) >= 0) {
@@ -354,7 +354,7 @@ hammer2_verify_volumes_1(hammer2_ondisk_t *fsp,
 	}
 
 	/* check volume */
-	vol = &fsp->volumes[0];
+	vol = &fsp->volumes[HAMMER2_ROOT_VOLUME];
 	path = vol->path;
 	if (vol->id)
 		errx(1, "%s has non zero id %d", path, vol->id);

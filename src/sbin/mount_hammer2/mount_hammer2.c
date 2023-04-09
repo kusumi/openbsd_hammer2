@@ -110,8 +110,15 @@ mount_hammer2_parseargs(int argc, char **argv,
 		free(tmp);
 	}
 
-	strlcpy(args->volume, canon_dev, sizeof(args->volume));
+	args->fspec = strcmp(argv[0], "") ? canon_dev : NULL;
 	args->hflags = HMNT2_LOCAL; /* force local, not optional */
+
+#define DEFAULT_ROOTUID	-2
+	args->export_info.ex_root = DEFAULT_ROOTUID;
+	if ((*mntflags) & MNT_RDONLY)
+		args->export_info.ex_flags = MNT_EXRDONLY;
+	else
+		args->export_info.ex_flags = 0;
 }
 
 static int
@@ -131,17 +138,17 @@ mount_hammer2(int argc, char **argv)
 			errcause = "mount table full";
 			break;
 		case EINVAL:
-			if (mntflags & MNT_UPDATE)
-				errcause =
+			errcause =
 			    "specified device does not match mounted device";
-			else 
-				errcause = "incorrect super block";
+			break;
+		case EOPNOTSUPP:
+			errcause = "filesystem not supported by kernel";
 			break;
 		default:
 			errcause = strerror(errno);
 			break;
 		}
-		errx(1, "%s on %s: %s", args.volume, canon_dir, errcause);
+		errx(1, "%s on %s: %s", args.fspec, canon_dir, errcause);
 	}
 
 	return (0);

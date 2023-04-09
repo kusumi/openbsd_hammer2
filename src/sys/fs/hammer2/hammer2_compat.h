@@ -38,8 +38,10 @@
 #ifndef _FS_HAMMER2_COMPAT_H_
 #define _FS_HAMMER2_COMPAT_H_
 
+#include <sys/cdefs.h>
 #include <sys/stdint.h>
 #include <sys/atomic.h>
+#include <sys/rwlock.h>
 
 #include <machine/cpufunc.h>
 
@@ -51,31 +53,36 @@
 /* Emulate INVARIANTS in FreeBSD. */
 #if 1
 #define INVARIANTS	DIAGNOSTIC
-#define __debugvar	__diagused
+#define __debugvar	__unused
+#define __diagused	__unused
 #else
 #define INVARIANTS	DEBUG
-#define __debugvar	__debugused
+#define __debugvar	__unused
+#define __diagused	__unused
 #endif
 
-/* DragonFly KKASSERT is NetBSD KASSERT equivalent. */
+/* DragonFly KKASSERT is OpenBSD KASSERT equivalent. */
 #define KKASSERT	KASSERT
 
-#if 0
-#define atomic_cmpset_uint(ptr, old, new)	\
+#define atomic_set_int		atomic_setbits_int
+#define atomic_clear_int	atomic_clearbits_int
+
+#define atomic_add_32		atomic_add_int
+
+#define atomic_cmpset_int(ptr, old, new)	\
 	(atomic_cas_uint((ptr), (old), (new)) == (old))
 
-#define atomic_cmpset_32(ptr, old, new)	\
-	(atomic_cas_32((ptr), (old), (new)) == (old))
+#define atomic_cmpset_32	atomic_cmpset_int
 
 /* XXX Not atomic, but harmless with current read-only support. */
 static __inline unsigned int
-atomic_fetchadd_uint(volatile unsigned int *p, unsigned int v)
+atomic_fetchadd_int(volatile unsigned int *p, unsigned int v)
 {
 	unsigned int value;
 
 	do {
 		value = *p;
-	} while (!atomic_cmpset_uint(p, value, value + v));
+	} while (!atomic_cmpset_int(p, value, value + v));
 	return (value);
 }
 
@@ -90,14 +97,21 @@ atomic_fetchadd_32(volatile uint32_t *p, uint32_t v)
 	return (value);
 }
 
-#define atomic_fetchadd_int	atomic_fetchadd_uint
+static __inline int
+rw_tryupgrade(struct rrwlock *p)
+{
+	KASSERT(rrw_status(p) != 0);
+	KASSERT(rrw_status(p) != RW_WRITE);
 
-/* XXX NetBSD only has arch dependent function. */
-#if defined(__i386__) || defined(__x86_64__)
-#define cpu_spinwait	x86_pause
-#else
-#define cpu_spinwait	do {} while (0)
-#endif
-#endif
+	rrw_exit(p);
+
+	return (rrw_enter(p, RW_WRITE|RW_NOSLEEP) ? 0 : 1); /* 0 on failure */
+}
+
+#define cpu_spinwait	CPU_BUSY_CYCLE
+
+/* Taken from sys/sys/cdefs.h in FreeBSD. */
+#define __compiler_membar()	__asm __volatile(" " : : : "memory")
+#define cpu_ccfence	__compiler_membar
 
 #endif /* !_FS_HAMMER2_COMPAT_H_ */

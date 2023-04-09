@@ -38,26 +38,56 @@
 #ifndef _FS_HAMMER2_MOUNT_H_
 #define _FS_HAMMER2_MOUNT_H_
 
-/* sys/sys/mount.h */
+#include <sys/mount.h>
+
+/* Also defined in sys/sys/mount.h. */
+#ifndef MOUNT_HAMMER2
 #define MOUNT_HAMMER2	"hammer2"	/* HAMMER2 Filesystem */
+#endif
 
 /*
  * This structure is passed from userland to the kernel during the mount
  * system call.
  *
- * The volume name is formatted as '/dev/ad0s1a@LABEL', where the label is
+ * The fspec is formatted as '/dev/ad0s1a@LABEL', where the label is
  * the mount point under the super-root.
  *
- * This struct must be compatible with struct hammer2_args defined in
- * sys/sys/mount.h, and size of this struct must not exceed 160.
+ * struct hammer2_mount_info definition must be same as struct hammer2_args,
+ * and its size must not exceed 160. The struct has to have char * at
+ * offset 0 followed by struct export_args.
  */
 struct hammer2_mount_info {
-	char		volume[100];	/* XXX2 was 1024, change this to pointer */
+	char		*fspec;
+	struct export_args export_info;	/* network export information */
 	int		hflags;		/* extended hammer2 mount flags */
 };
+
+#if 0
+_Static_assert(sizeof(struct hammer2_mount_info) == sizeof(struct hammer2_args),
+    "struct hammer2_mount_info size != struct hammer2_args size");
+_Static_assert(sizeof(struct hammer2_mount_info) <= 160,
+    "struct hammer2_mount_info size exceeds 160");
+#endif
 
 #define HMNT2_LOCAL		0x00000002
 
 #define HMNT2_DEVFLAGS		(HMNT2_LOCAL)
+
+/* for sbin/sysctl/sysctl.c */
+#define HAMMER2CTL_SUPPORTED_VERSION	1
+#define HAMMER2CTL_INODE_ALLOCS		2
+#define HAMMER2CTL_CHAIN_ALLOCS		3
+#define HAMMER2CTL_DIO_ALLOCS		4
+#define HAMMER2CTL_DIO_LIMIT		5
+#define HAMMER2CTL_MAXID		6
+
+#define HAMMER2_NAMES { \
+	{ 0, 0, }, \
+	{ "supported_version", CTLTYPE_INT, }, \
+	{ "inode_allocs", CTLTYPE_INT, }, \
+	{ "chain_allocs", CTLTYPE_INT, }, \
+	{ "dio_allocs", CTLTYPE_INT, }, \
+	{ "dio_limit", CTLTYPE_INT, }, \
+}
 
 #endif /* !_FS_HAMMER2_MOUNT_H_ */
