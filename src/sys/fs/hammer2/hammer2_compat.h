@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2023 Tomohiro Kusumi <tkusumi@netbsd.org>
+ * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
  * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
@@ -53,11 +53,9 @@
 /* Emulate INVARIANTS in FreeBSD. */
 #if 1
 #define INVARIANTS	DIAGNOSTIC
-#define __debugvar	__unused
 #define __diagused	__unused
 #else
 #define INVARIANTS	DEBUG
-#define __debugvar	__unused
 #define __diagused	__unused
 #endif
 

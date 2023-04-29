@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2023 Tomohiro Kusumi <tkusumi@netbsd.org>
+ * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
  * Copyright (c) 2011-2023 The DragonFly Project.  All rights reserved.
  * Copyright (c) 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
@@ -33,7 +33,6 @@
 
 #include <sys/param.h>
 #include <sys/mount.h>
-#include <fs/hammer2/hammer2_mount.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +42,8 @@
 #include <errno.h>
 #include <err.h>
 #include <mntopts.h>
+
+#include <fs/hammer2/hammer2_mount.h>
 
 static int mount_hammer2(int argc, char **argv);
 static void usage(const char *ctl, ...);

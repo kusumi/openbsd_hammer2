@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2023 Tomohiro Kusumi <tkusumi@netbsd.org>
+ * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
  * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
@@ -61,13 +61,6 @@ struct hammer2_mount_info {
 	struct export_args export_info;	/* network export information */
 	int		hflags;		/* extended hammer2 mount flags */
 };
-
-#if 0
-_Static_assert(sizeof(struct hammer2_mount_info) == sizeof(struct hammer2_args),
-    "struct hammer2_mount_info size != struct hammer2_args size");
-_Static_assert(sizeof(struct hammer2_mount_info) <= 160,
-    "struct hammer2_mount_info size exceeds 160");
-#endif
 
 #define HMNT2_LOCAL		0x00000002
 

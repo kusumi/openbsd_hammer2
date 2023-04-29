@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2023 Tomohiro Kusumi <tkusumi@netbsd.org>
+ * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
  * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
@@ -124,6 +124,9 @@ hammer2_start(struct mount *mp, int flags, struct proc *p)
 static int
 hammer2_init(struct vfsconf *vfsp)
 {
+	KASSERT(sizeof(struct hammer2_mount_info) == sizeof(struct hammer2_args));
+	KASSERT(sizeof(struct hammer2_mount_info) <= 160); /* union mount_info */
+
 	hammer2_assert_clean();
 
 	hammer2_dio_limit = buf_nbuf() * 2;
@@ -748,6 +751,8 @@ next_hmp:
 		 */
 		hammer2_update_pmps(hmp);
 	} else {
+		/* hmp->devvp_list is already constructed. */
+		hammer2_cleanup_devvp(&devvpl);
 		spmp = hmp->spmp;
 		/* XXX OpenBSD HAMMER2 always has HMNT2_LOCAL set, so ignore.
 		if (args->hflags & HMNT2_DEVFLAGS)

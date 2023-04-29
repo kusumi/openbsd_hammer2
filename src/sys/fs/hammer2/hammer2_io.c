@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2023 Tomohiro Kusumi <tkusumi@netbsd.org>
+ * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
  * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
@@ -281,7 +281,7 @@ static int
 hammer2_io_cleanup_callback(hammer2_io_t *dio, void *arg)
 {
 	struct hammer2_cleanupcb_info *info = arg;
-	hammer2_io_t *xio __debugvar;
+	hammer2_io_t *xio __diagused;
 	int act;
 
 	/* Only putblk'd dio does not require locking. */

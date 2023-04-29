@@ -51,4 +51,4 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 + Tags are merely for packaging, nothing directly to do with file system version.
 
-+ [makefs(8) for Linux](https://github.com/kusumi/makefs) supports HAMMER2 image creation from a directory contents on Linux. There is currently no way to do this on OpenBSD.
++ [makefs](https://github.com/kusumi/makefs) supports HAMMER2 image creation from a directory contents.

@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2023 Tomohiro Kusumi <tkusumi@netbsd.org>
+ * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
  * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
@@ -39,7 +39,6 @@
 #include <sys/systm.h>
 #include <sys/buf.h>
 #include <sys/dirent.h>
-#include <sys/malloc.h>
 #include <sys/namei.h>
 #include <sys/uio.h>
 #include <sys/unistd.h>
@@ -70,7 +69,6 @@ hammer2_inactive(void *v)
 	if (prtactive && vp->v_usecount != 0)
 		vprint("hammer2_inactive: pushing active", vp);
 #endif
-
 	VOP_UNLOCK(vp);
 
 	if (ip->meta.mode == 0) {
@@ -100,7 +98,6 @@ hammer2_reclaim(void *v)
 	if (prtactive && vp->v_usecount != 0)
 		vprint("hammer2_reclaim: pushing active", vp);
 #endif
-
 	/*
 	 * Purge old data structures associated with the inode.
 	 */
@@ -258,21 +255,20 @@ hammer2_readdir(void *v)
 		struct ucred *a_cred;
 		int *a_eofflag;
 	} */ *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct uio *uio = ap->a_uio;
 
 	hammer2_xop_readdir_t *xop;
-	hammer2_inode_t *ip = VTOI(ap->a_vp);
+	hammer2_inode_t *ip = VTOI(vp);
 	const hammer2_inode_data_t *ripdata;
 	hammer2_blockref_t bref;
 	hammer2_tid_t inum;
-	hammer2_key_t lkey;
-	struct uio *uio = ap->a_uio;
 	off_t saveoff = uio->uio_offset;
-	int r, dtype;
-	int eofflag = 0, error = 0;
+	int r, dtype, eofflag = 0, error = 0;
 	uint16_t namlen;
 	const char *dname;
 
-	if (ap->a_vp->v_type != VDIR)
+	if (vp->v_type != VDIR)
 		return (ENOTDIR);
 
 	hammer2_inode_lock(ip, HAMMER2_RESOLVE_SHARED);
@@ -293,6 +289,8 @@ hammer2_readdir(void *v)
 			goto done;
 		++saveoff;
 	}
+	if (error)
+		goto done;
 
 	if (saveoff == 1) {
 		inum = ip->meta.inum & HAMMER2_DIRHASH_USERMSK;
@@ -303,14 +301,12 @@ hammer2_readdir(void *v)
 			goto done;
 		++saveoff;
 	}
-
-	lkey = saveoff | HAMMER2_DIRHASH_VISIBLE;
 	if (error)
 		goto done;
 
 	/* Use XOP for remaining entries. */
 	xop = hammer2_xop_alloc(ip);
-	xop->lkey = lkey;
+	xop->lkey = saveoff | HAMMER2_DIRHASH_VISIBLE;
 	hammer2_xop_start(&xop->head, &hammer2_readdir_desc);
 
 	for (;;) {
@@ -682,8 +678,7 @@ hammer2_print(void *v)
 	struct vop_print_args /* {
 		struct vnode *a_vp;
 	} */ *ap = v;
-	struct vnode *vp = ap->a_vp;
-	hammer2_inode_t *ip = VTOI(vp);
+	hammer2_inode_t *ip = VTOI(ap->a_vp);
 
 	printf("tag VT_HAMMER2, ino %ju", (uintmax_t)ip->meta.inum);
 	printf("\n");
@@ -699,6 +694,7 @@ hammer2_pathconf(void *v)
 		int a_name;
 		register_t *a_retval;
 	} */ *ap = v;
+	struct vnode *vp = ap->a_vp;
 	int error = 0;
 
 	switch (ap->a_name) {
@@ -712,7 +708,7 @@ hammer2_pathconf(void *v)
 		*ap->a_retval = PATH_MAX;
 		break;
 	case _PC_PIPE_BUF:
-		if (ap->a_vp->v_type == VDIR || ap->a_vp->v_type == VFIFO)
+		if (vp->v_type == VDIR || vp->v_type == VFIFO)
 			*ap->a_retval = PIPE_BUF;
 		else
 			error = EINVAL;
