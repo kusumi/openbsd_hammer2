@@ -1,0 +1,225 @@
+diff --git a/distrib/sets/lists/comp/mi b/distrib/sets/lists/comp/mi
+index 85cf423..d6c4c40 100644
+--- a/distrib/sets/lists/comp/mi
++++ b/distrib/sets/lists/comp/mi
+@@ -908,6 +908,10 @@
+ ./usr/include/getopt.h
+ ./usr/include/glob.h
+ ./usr/include/grp.h
++./usr/include/hammer2
++./usr/include/hammer2/hammer2_disk.h
++./usr/include/hammer2/hammer2_ioctl.h
++./usr/include/hammer2/hammer2_mount.h
+ ./usr/include/histedit.h
+ ./usr/include/icdb.h
+ ./usr/include/ifaddrs.h
+diff --git a/sbin/sysctl/Makefile b/sbin/sysctl/Makefile
+index 6454e1d..ce5e90f 100644
+--- a/sbin/sysctl/Makefile
++++ b/sbin/sysctl/Makefile
+@@ -4,6 +4,7 @@ PROG=	sysctl
+ MAN=	sysctl.8
+ 
+ CPPFLAGS+=	-D_LIBKVM
++CPPFLAGS+=	-I${.CURDIR}/../../sys # XXX
+ 
+ afterinstall:
+ 	ln -sf ../../sbin/sysctl ${DESTDIR}/usr/sbin
+diff --git a/sbin/sysctl/sysctl.c b/sbin/sysctl/sysctl.c
+index e7ce921..9ac03a9 100644
+--- a/sbin/sysctl/sysctl.c
++++ b/sbin/sysctl/sysctl.c
+@@ -91,6 +91,8 @@
+ #include <nfs/nfsproto.h>
+ #include <nfs/nfs.h>
+ 
++#include <hammer2/hammer2_mount.h>
++
+ #include <ddb/db_var.h>
+ 
+ #include <ctype.h>
+@@ -1250,6 +1252,7 @@ struct ctlname vfsgennames[] = CTL_VFSGENCTL_NAMES;
+ struct ctlname ffsname[] = FFS_NAMES;
+ struct ctlname nfsname[] = FS_NFS_NAMES;
+ struct ctlname fusefsname[] = FUSEFS_NAMES;
++struct ctlname hammer2name[] = HAMMER2_NAMES;
+ struct list *vfsvars;
+ int *vfs_typenums;
+ 
+@@ -1312,6 +1315,10 @@ vfsinit(void)
+ 			vfsvars[cnt].list = fusefsname;
+ 			vfsvars[cnt].size = FUSEFS_MAXID;
+ 		}
++		if (!strcmp(vfc.vfc_name, MOUNT_HAMMER2)) {
++			vfsvars[cnt].list = hammer2name;
++			vfsvars[cnt].size = HAMMER2CTL_MAXID;
++		}
+ 		vfs_typenums[cnt] = vfc.vfc_typenum;
+ 		strlcat(&names[loc], vfc.vfc_name, sizeof names - loc);
+ 		vfsname[cnt].ctl_name = &names[loc];
+diff --git a/sys/conf/GENERIC b/sys/conf/GENERIC
+index f7bb589..5e57732 100644
+--- a/sys/conf/GENERIC
++++ b/sys/conf/GENERIC
+@@ -42,6 +42,7 @@ option		MSDOSFS		# MS-DOS file system
+ option		FIFO		# FIFOs; RECOMMENDED
+ #option		TMPFS		# efficient memory file system
+ option		FUSE		# FUSE
++option		HAMMER2		# HAMMER2 file system
+ 
+ option		SOCKET_SPLICE	# Socket Splicing for TCP and UDP
+ option		TCP_ECN		# Explicit Congestion Notification for TCP
+diff --git a/sys/conf/files b/sys/conf/files
+index 6611400..9f7d179 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -804,6 +804,20 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
+ file tmpfs/tmpfs_vnops.c		tmpfs
+ file tmpfs/tmpfs_specops.c		tmpfs
+ file tmpfs/tmpfs_fifoops.c		tmpfs & fifo
++file hammer2/hammer2_admin.c		hammer2
++file hammer2/hammer2_chain.c		hammer2
++file hammer2/hammer2_cluster.c		hammer2
++file hammer2/hammer2_inode.c		hammer2
++file hammer2/hammer2_io.c		hammer2
++file hammer2/hammer2_ioctl.c		hammer2
++file hammer2/hammer2_lz4.c		hammer2
++file hammer2/hammer2_ondisk.c		hammer2
++file hammer2/hammer2_strategy.c		hammer2
++file hammer2/hammer2_subr.c		hammer2
++file hammer2/hammer2_vfsops.c		hammer2
++file hammer2/hammer2_vnops.c		hammer2
++file hammer2/hammer2_xops.c		hammer2
++file hammer2/xxhash/xxhash.c		hammer2
+ file net/art.c
+ file net/bpf.c				bpfilter		needs-count
+ file net/bpf_filter.c			bpfilter
+@@ -1041,6 +1055,7 @@ file lib/libkern/getsn.c
+ file lib/libkern/random.c
+ file lib/libkern/explicit_bzero.c
+ file lib/libkern/timingsafe_bcmp.c
++file lib/libkern/icrc32.c
+ file lib/libkern/arch/${MACHINE_ARCH}/strchr.S | lib/libkern/strchr.c
+ file lib/libkern/arch/${MACHINE_ARCH}/strrchr.S | lib/libkern/strrchr.c
+ file lib/libkern/arch/${MACHINE_ARCH}/imax.S | lib/libkern/imax.c
+diff --git a/sys/kern/vfs_init.c b/sys/kern/vfs_init.c
+index 84c00f0..59715d5 100644
+--- a/sys/kern/vfs_init.c
++++ b/sys/kern/vfs_init.c
+@@ -100,6 +100,11 @@ static struct vfsconf vfsconflist[] = {
+ 	{ &tmpfs_vfsops, MOUNT_TMPFS, 19, 0, MNT_LOCAL,
+ 	    sizeof(struct tmpfs_args) },
+ #endif
++
++#ifdef HAMMER2
++	{ &hammer2_vfsops, "hammer2", 20, 0, MNT_LOCAL,
++	    sizeof(struct hammer2_args) },
++#endif
+ };
+ 
+ 
+diff --git a/sys/kern/vfs_vnops.c b/sys/kern/vfs_vnops.c
+index e6a175e..f3c491b 100644
+--- a/sys/kern/vfs_vnops.c
++++ b/sys/kern/vfs_vnops.c
+@@ -517,7 +517,8 @@ vn_ioctl(struct file *fp, u_long com, caddr_t data, struct proc *p)
+ 
+ 		} else if (com == FIONBIO || com == FIOASYNC)	/* XXX */
+ 			error = 0;				/* XXX */
+-		break;
++		if (error != ENOTTY)
++			break;
+ 
+ 	case VFIFO:
+ 	case VCHR:
+diff --git a/sys/sys/malloc.h b/sys/sys/malloc.h
+index 97bf9ff..4f8b6fd 100644
+--- a/sys/sys/malloc.h
++++ b/sys/sys/malloc.h
+@@ -177,7 +177,11 @@
+ 
+ #define M_DRM		145	/* Direct Rendering Manager */
+ 
+-#define	M_LAST		146	/* Must be last type + 1 */
++#define	M_HAMMER2	146	/* HAMMER2 */
++#define	M_HAMMER2_RBUF	147	/* HAMMER2 read buffer */
++#define	M_HAMMER2_LZ4	148	/* HAMMER2 LZ4 */
++
++#define	M_LAST		149	/* Must be last type + 1 */
+ 
+ #define	INITKMEMNAMES { \
+ 	"free",		/* 0 M_FREE */ \
+@@ -307,6 +311,9 @@
+ 	NULL,	/* 143 free */ \
+ 	"AGP Memory",	/* 144 M_AGP */ \
+ 	"DRM",	/* 145 M_DRM */ \
++	"HAMMER2", /* 146 M_HAMMER2 */ \
++	"HAMMER2 read buffer", /* 147 M_HAMMER2_RBUF */ \
++	"HAMMER2 LZ4", /* 148 M_HAMMER2_LZ4 */ \
+ }
+ 
+ struct kmemstats {
+diff --git a/sys/sys/mount.h b/sys/sys/mount.h
+index 40c12e9..d18fa04 100644
+--- a/sys/sys/mount.h
++++ b/sys/sys/mount.h
+@@ -257,6 +257,15 @@ struct fusefs_args {
+ 	int allow_other;
+ };
+ 
++/*
++ * Arguments to mount HAMMER2 file systems
++ */
++struct hammer2_args {
++	char		*fspec;
++	struct export_args export_info;	/* network export information */
++	int		hflags;		/* extended hammer2 mount flags */
++};
++
+ /*
+  * file system statistics
+  */
+@@ -273,6 +282,7 @@ union mount_info {
+ 	struct msdosfs_args msdosfs_args;
+ 	struct ntfs_args ntfs_args;
+ 	struct tmpfs_args tmpfs_args;
++	struct hammer2_args hammer2_args;
+ 	char __align[160];	/* 64-bit alignment and room to grow */
+ };
+ 
+@@ -325,6 +335,7 @@ struct statfs {
+ #define	MOUNT_UDF	"udf"		/* UDF */
+ #define	MOUNT_TMPFS	"tmpfs"		/* tmpfs */
+ #define	MOUNT_FUSEFS	"fuse"		/* FUSE */
++#define	MOUNT_HAMMER2	"hammer2"	/* HAMMER2 */
+ 
+ /*
+  * Structure per mounted file system.  Each mounted file system has an
+@@ -558,6 +569,7 @@ extern	const struct vfsops ntfs_vfsops;
+ extern	const struct vfsops udf_vfsops;
+ extern	const struct vfsops fusefs_vfsops;
+ extern	const struct vfsops tmpfs_vfsops;
++extern	const struct vfsops hammer2_vfsops;
+ 
+ #include <net/radix.h>
+ #include <sys/socket.h>		/* XXX for AF_MAX */
+diff --git a/sys/sys/vnode.h b/sys/sys/vnode.h
+index 30787af..19c4fb1 100644
+--- a/sys/sys/vnode.h
++++ b/sys/sys/vnode.h
+@@ -67,12 +67,14 @@ enum vtagtype	{
+ 	VT_NON, VT_UFS, VT_NFS, VT_MFS, VT_MSDOSFS,
+ 	VT_PORTAL, VT_PROCFS, VT_AFS, VT_ISOFS, VT_ADOSFS,
+ 	VT_EXT2FS, VT_VFS, VT_NTFS, VT_UDF, VT_FUSEFS, VT_TMPFS,
++	VT_HAMMER2,
+ };
+ 
+ #define	VTAG_NAMES \
+     "NON", "UFS", "NFS", "MFS", "MSDOSFS",			\
+     "unused", "unused", "unused", "ISOFS", "unused",		\
+-    "EXT2FS", "VFS", "NTFS", "UDF", "FUSEFS", "TMPFS"
++    "EXT2FS", "VFS", "NTFS", "UDF", "FUSEFS", "TMPFS",		\
++    "HAMMER2"
+ 
+ /*
+  * Each underlying filesystem allocates its own private area and hangs

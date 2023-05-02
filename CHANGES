@@ -1,3 +1,7 @@
+v1.0.2
+======
+- Add patch/openbsd73.patch
+
 v1.0.1
 ======
 - Minor fix and cleanup
