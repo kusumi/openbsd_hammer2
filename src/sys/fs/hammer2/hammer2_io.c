@@ -345,6 +345,20 @@ hammer2_io_data(hammer2_io_t *dio, off_t lbase)
 }
 
 int
+hammer2_io_new(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
+    hammer2_io_t **diop)
+{
+	return (EOPNOTSUPP);
+}
+
+int
+hammer2_io_newnz(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
+    hammer2_io_t **diop)
+{
+	return (EOPNOTSUPP);
+}
+
+int
 hammer2_io_bread(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
     hammer2_io_t **diop)
 {
@@ -356,4 +370,9 @@ void
 hammer2_io_bqrelse(hammer2_io_t **diop)
 {
 	hammer2_io_putblk(diop);
+}
+
+void
+hammer2_io_dedup_set(hammer2_dev_t *hmp, hammer2_blockref_t *bref)
+{
 }

@@ -9,17 +9,13 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 ## Requirements
 
-+ Recent OpenBSD
++ OpenBSD 7.3
 
-    + Compiles and tested with OpenBSD 7.2 and 7.3
-
-    + Never compiled or tested with other releses or -CURRENT
-
-+ OpenBSD src tree under /usr/src
++ OpenBSD 7.3 src tree under /usr/src
 
 + Bash
 
-## OpenBSD build (OpenBSD 7.3)
+## OpenBSD build
 
 1. Apply [patch/openbsd73.patch](patch/openbsd73.patch) against /usr/src.
 

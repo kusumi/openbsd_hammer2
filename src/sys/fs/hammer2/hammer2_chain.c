@@ -966,6 +966,13 @@ hammer2_chain_countbrefs(hammer2_chain_t *chain, hammer2_blockref_t *base,
 	hammer2_spin_unex(&chain->core.spin);
 }
 
+int
+hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
+    hammer2_off_t dedup_off, int flags)
+{
+	return (EOPNOTSUPP);
+}
+
 /*
  * This function returns the chain at the nearest key within the specified
  * range.  The returned chain will be referenced but not locked.
@@ -1526,6 +1533,15 @@ hammer2_chain_next(hammer2_chain_t **parentp, hammer2_chain_t *chain,
 	/* And execute. */
 	return (hammer2_chain_lookup(parentp, key_nextp, key_beg, key_end,
 	    errorp, flags));
+}
+
+int
+hammer2_chain_create(hammer2_chain_t **parentp, hammer2_chain_t **chainp,
+    hammer2_dev_t *hmp, hammer2_pfs_t *pmp, int methods, hammer2_key_t key,
+    int keybits, int type, size_t bytes, hammer2_tid_t mtid,
+    hammer2_off_t dedup_off, int flags)
+{
+	return (EOPNOTSUPP);
 }
 
 /*

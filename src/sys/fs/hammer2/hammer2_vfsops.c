@@ -405,6 +405,7 @@ again:
 			if (hmp->spmp == pmp) {
 				hmp->spmp = NULL;
 				hmp->vchain.pmp = NULL;
+				hmp->fchain.pmp = NULL;
 			}
 
 			/* Free the pmp and restart the loop. */
@@ -619,6 +620,8 @@ next_hmp:
 		RB_INIT(&hmp->iotree);
 		hammer2_mtx_init(&hmp->iotree_lock, "h2hmp_iotlk");
 
+		rw_init(&hmp->vollk, "h2vollk");
+
 		/*
 		 * vchain setup.  vchain.data is embedded.
 		 * vchain.refs is initialized and will never drop to 0.
@@ -630,6 +633,27 @@ next_hmp:
 		hmp->vchain.bref.data_off = 0 | HAMMER2_PBUFRADIX;
 		hmp->vchain.bref.mirror_tid = hmp->voldata.mirror_tid;
 		hammer2_chain_init(&hmp->vchain);
+
+		/*
+		 * fchain setup.  fchain.data is embedded.
+		 * fchain.refs is initialized and will never drop to 0.
+		 *
+		 * The data is not used but needs to be initialized to
+		 * pass assertion muster.  We use this chain primarily
+		 * as a placeholder for the freemap's top-level radix tree
+		 * so it does not interfere with the volume's topology
+		 * radix tree.
+		 */
+		hmp->fchain.hmp = hmp;
+		hmp->fchain.refs = 1;
+		hmp->fchain.data = (void *)&hmp->voldata.freemap_blockset;
+		hmp->fchain.bref.type = HAMMER2_BREF_TYPE_FREEMAP;
+		hmp->fchain.bref.data_off = 0 | HAMMER2_PBUFRADIX;
+		hmp->fchain.bref.mirror_tid = hmp->voldata.freemap_tid;
+		hmp->fchain.bref.methods =
+		    HAMMER2_ENC_CHECK(HAMMER2_CHECK_FREEMAP) |
+		    HAMMER2_ENC_COMP(HAMMER2_COMP_NONE);
+		hammer2_chain_init(&hmp->fchain);
 
 		/* Initialize volume header related fields. */
 		KKASSERT(hmp->voldata.magic == HAMMER2_VOLUME_ID_HBO ||
@@ -665,12 +689,15 @@ next_hmp:
 		spmp->pfs_hmps[0] = hmp;
 
 		/*
-		 * Dummy-up vchain's modify_tid.
+		 * Dummy-up vchain and fchain's modify_tid.
 		 * mirror_tid is inherited from the volume header.
 		 */
 		hmp->vchain.bref.mirror_tid = hmp->voldata.mirror_tid;
 		hmp->vchain.bref.modify_tid = hmp->vchain.bref.mirror_tid;
 		hmp->vchain.pmp = spmp;
+		hmp->fchain.bref.mirror_tid = hmp->voldata.freemap_tid;
+		hmp->fchain.bref.modify_tid = hmp->fchain.bref.mirror_tid;
+		hmp->fchain.pmp = spmp;
 
 		/*
 		 * First locate the super-root inode, which is key 0
@@ -701,6 +728,8 @@ next_hmp:
 			hammer2_unmount(mp, MNT_FORCE, curproc);
 			return (EINVAL);
 		}
+
+		spmp->modify_tid = schain->bref.modify_tid + 1;
 
 		/*
 		 * Sanity-check schain's pmp and finish initialization.
@@ -1076,14 +1105,17 @@ again:
 	}
 	KKASSERT(TAILQ_EMPTY(&hmp->devvp_list));
 #ifdef INVARIANTS
-	/*
-	 * Final drop of embedded volume root chain to clean up
-	 * vchain.core (vchain structure is not flagged ALLOCATED
-	 * so it is cleaned out and then left to rot).
-	 */
 	dumpcnt = 50;
 	hammer2_dump_chain(&hmp->vchain, 0, 0, &dumpcnt, 'v', (unsigned int)-1);
+	dumpcnt = 50;
+	hammer2_dump_chain(&hmp->fchain, 0, 0, &dumpcnt, 'f', (unsigned int)-1);
+	/*
+	 * Final drop of embedded volume/freemap root chain to clean up
+	 * [vf]chain.core ([vf]chain structure is not flagged ALLOCATED so
+	 * it is cleaned out and then left to rot).
+	 */
 	hammer2_chain_drop(&hmp->vchain);
+	hammer2_chain_drop(&hmp->fchain);
 #endif
 	hammer2_mtx_ex(&hmp->iotree_lock);
 	hammer2_io_cleanup(hmp, &hmp->iotree);
@@ -1095,6 +1127,48 @@ again:
 	hammer2_mtx_destroy(&hmp->iotree_lock);
 
 	free(hmp, M_HAMMER2, 0);
+}
+
+void
+hammer2_pfs_memory_inc(hammer2_pfs_t *pmp)
+{
+	if (pmp) {
+		atomic_add_int(&pmp->inmem_dirty_chains, 1);
+	}
+}
+
+/*
+ * Volume header data locks.
+ */
+void
+hammer2_voldata_lock(hammer2_dev_t *hmp)
+{
+	rw_enter_write(&hmp->vollk);
+}
+
+void
+hammer2_voldata_unlock(hammer2_dev_t *hmp)
+{
+	rw_exit_write(&hmp->vollk);
+}
+
+/*
+ * Caller indicates that the volume header is being modified.
+ * Flag the related chain and adjust its transaction id.
+ *
+ * The transaction id is set to voldata.mirror_tid + 1, similar to
+ * what hammer2_chain_modify() does.  Be very careful here, volume
+ * data can be updated independently of the rest of the filesystem.
+ */
+void
+hammer2_voldata_modify(hammer2_dev_t *hmp)
+{
+	if ((hmp->vchain.flags & HAMMER2_CHAIN_MODIFIED) == 0) {
+		//atomic_add_long(&hammer2_count_modified_chains, 1);
+		atomic_set_int(&hmp->vchain.flags, HAMMER2_CHAIN_MODIFIED);
+		hammer2_pfs_memory_inc(hmp->vchain.pmp);
+		hmp->vchain.bref.mirror_tid = hmp->voldata.mirror_tid + 1;
+	}
 }
 
 static int

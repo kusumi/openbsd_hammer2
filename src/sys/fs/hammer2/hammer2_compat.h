@@ -62,6 +62,8 @@
 /* DragonFly KKASSERT is OpenBSD KASSERT equivalent. */
 #define KKASSERT	KASSERT
 
+#define rounddown2(x, y) ((x) & ~((y) - 1))	/* y power of two */
+
 #define atomic_set_int		atomic_setbits_int
 #define atomic_clear_int	atomic_clearbits_int
 
@@ -71,6 +73,9 @@
 	(atomic_cas_uint((ptr), (old), (new)) == (old))
 
 #define atomic_cmpset_32	atomic_cmpset_int
+
+#define atomic_cmpset_64(ptr, old, new)		\
+	(__sync_val_compare_and_swap((ptr), (old), (new)))
 
 /* XXX Not atomic, but harmless with current read-only support. */
 static __inline unsigned int
@@ -92,6 +97,17 @@ atomic_fetchadd_32(volatile uint32_t *p, uint32_t v)
 	do {
 		value = *p;
 	} while (!atomic_cmpset_32(p, value, value + v));
+	return (value);
+}
+
+static __inline uint64_t
+atomic_fetchadd_64(volatile uint64_t *p, uint64_t v)
+{
+	uint64_t value;
+
+	do {
+		value = *p;
+	} while (!atomic_cmpset_64(p, value, value + v));
 	return (value);
 }
 

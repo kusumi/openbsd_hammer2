@@ -70,16 +70,18 @@ index f7bb589..5e57732 100644
  option		SOCKET_SPLICE	# Socket Splicing for TCP and UDP
  option		TCP_ECN		# Explicit Congestion Notification for TCP
 diff --git a/sys/conf/files b/sys/conf/files
-index 6611400..9f7d179 100644
+index 6611400..7f90b5f 100644
 --- a/sys/conf/files
 +++ b/sys/conf/files
-@@ -804,6 +804,20 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
+@@ -804,6 +804,22 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
  file tmpfs/tmpfs_vnops.c		tmpfs
  file tmpfs/tmpfs_specops.c		tmpfs
  file tmpfs/tmpfs_fifoops.c		tmpfs & fifo
 +file hammer2/hammer2_admin.c		hammer2
 +file hammer2/hammer2_chain.c		hammer2
 +file hammer2/hammer2_cluster.c		hammer2
++file hammer2/hammer2_flush.c		hammer2
++file hammer2/hammer2_freemap.c		hammer2
 +file hammer2/hammer2_inode.c		hammer2
 +file hammer2/hammer2_io.c		hammer2
 +file hammer2/hammer2_ioctl.c		hammer2
@@ -94,7 +96,7 @@ index 6611400..9f7d179 100644
  file net/art.c
  file net/bpf.c				bpfilter		needs-count
  file net/bpf_filter.c			bpfilter
-@@ -1041,6 +1055,7 @@ file lib/libkern/getsn.c
+@@ -1041,6 +1057,7 @@ file lib/libkern/getsn.c
  file lib/libkern/random.c
  file lib/libkern/explicit_bzero.c
  file lib/libkern/timingsafe_bcmp.c

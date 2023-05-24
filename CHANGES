@@ -1,3 +1,8 @@
+v1.1.0
+======
+- Add fchain
+- Add freemap functions
+
 v1.0.2
 ======
 - Add patch/openbsd73.patch

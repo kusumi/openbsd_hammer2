@@ -179,6 +179,38 @@ hammer2_dirhash(const char *aname, size_t len)
 }
 
 /*
+ * Convert bytes to radix with no limitations.
+ *
+ * 0 bytes is special-cased to a radix of zero (which would normally
+ * translate to (1 << 0) == 1).
+ */
+int
+hammer2_getradix(size_t bytes)
+{
+	int radix;
+
+	/*
+	 * Optimize the iteration by pre-checking commonly used radixes.
+	 */
+	if (bytes == HAMMER2_PBUFSIZE)
+		radix = HAMMER2_PBUFRADIX;
+	else if (bytes >= HAMMER2_LBUFSIZE)
+		radix = HAMMER2_LBUFRADIX;
+	else if (bytes >= HAMMER2_ALLOC_MIN)	/* clamp */
+		radix = HAMMER2_RADIX_MIN;
+	else
+		radix = 0;
+
+	/*
+	 * Iterate as needed.  Note that bytes == 0 is expected to return
+	 * a radix of 0 as a special case.
+	 */
+	while (((size_t)1 << radix) < bytes)
+		++radix;
+	return (radix);
+}
+
+/*
  * The logical block size is currently always PBUFSIZE.
  */
 int
