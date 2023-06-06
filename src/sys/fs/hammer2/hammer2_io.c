@@ -143,7 +143,7 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off)
 		}
 	}
 
-	dio->ticks = ticks;
+	dio->ticks = getticks();
 	if (dio->act < 10)
 		++dio->act;
 
@@ -288,7 +288,7 @@ hammer2_io_cleanup_callback(hammer2_io_t *dio, void *arg)
 	hammer2_mtx_ex(&dio->lock);
 	if ((dio->refs & HAMMER2_DIO_MASK) == 0) {
 		if (dio->act > 0) {
-			act = dio->act - (ticks - dio->ticks) / hz - 1;
+			act = dio->act - (getticks() - dio->ticks) / hz - 1;
 			if (act > 0) {
 				dio->act = act;
 				hammer2_mtx_unlock(&dio->lock);
@@ -374,5 +374,17 @@ hammer2_io_bqrelse(hammer2_io_t **diop)
 
 void
 hammer2_io_dedup_set(hammer2_dev_t *hmp, hammer2_blockref_t *bref)
+{
+}
+
+void
+hammer2_io_dedup_delete(hammer2_dev_t *hmp, uint8_t btype,
+    hammer2_off_t data_off, unsigned int bytes)
+{
+}
+
+void
+hammer2_io_dedup_assert(hammer2_dev_t *hmp, hammer2_off_t data_off,
+    unsigned int bytes)
 {
 }

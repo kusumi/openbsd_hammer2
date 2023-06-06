@@ -40,6 +40,11 @@
 
 #include "hammer2.h"
 
+void
+hammer2_trans_init(hammer2_pfs_t *pmp, uint32_t flags)
+{
+}
+
 /*
  * Start a sub-transaction, there is no 'subdone' function.  This will
  * issue a new modify_tid (mtid) for the current transaction, which is a
@@ -59,4 +64,9 @@ hammer2_trans_sub(hammer2_pfs_t *pmp)
 	mtid = atomic_fetchadd_64(&pmp->modify_tid, 1);
 
 	return (mtid);
+}
+
+void
+hammer2_trans_done(hammer2_pfs_t *pmp, uint32_t flags)
+{
 }

@@ -48,6 +48,7 @@
 
 int VerboseOpt;
 int QuietOpt;
+size_t MemOpt;
 
 static void usage(int code);
 
@@ -55,6 +56,7 @@ int
 main(int ac, char **av)
 {
 	char *sel_path = NULL;
+	char *opt;
 	int ecode = 0;
 	int ch;
 
@@ -63,6 +65,29 @@ main(int ac, char **av)
 	 */
 	while ((ch = getopt(ac, av, "s:vq")) != -1) {
 		switch(ch) {
+		case 'm':
+			MemOpt = strtoul(optarg, &opt, 0);
+			switch(*opt) {
+			case 'g':
+			case 'G':
+				MemOpt *= 1024;
+				/* FALLTHROUGH */
+			case 'm':
+			case 'M':
+				MemOpt *= 1024;
+				/* FALLTHROUGH */
+			case 'k':
+			case 'K':
+				MemOpt *= 1024;
+				break;
+			case 0:
+				break;
+			default:
+				fprintf(stderr, "-m: Unrecognized suffix\n");
+				usage(1);
+				break;
+			}
+			break;
 		case 's':
 			sel_path = strdup(optarg);
 			break;
@@ -185,6 +210,13 @@ main(int ac, char **av)
 		} else {
 			print_inode(av[1]);
 		}
+	} else if (strcmp(av[0], "bulkfree") == 0) {
+		if (ac != 2) {
+			fprintf(stderr, "bulkfree: requires path to mount\n");
+			usage(1);
+		} else {
+			ecode = cmd_bulkfree(av[1]);
+		}
 	} else {
 		fprintf(stderr, "Unrecognized command: %s\n", av[0]);
 		usage(1);
@@ -200,6 +232,7 @@ usage(int code)
 	fprintf(stderr,
 		"hammer2 [options] command [argument ...]\n"
 		"    -s path            Select filesystem\n"
+		"    -m mem[k,m,g]      buffer memory (bulkfree)\n"
 		"\n"
 		"    pfs-list [<path>...]              "
 			"List PFSs\n"
@@ -217,6 +250,8 @@ usage(int code)
 			"Raw hammer2 media dump for the volume header(s)\n"
 		"    volume-list [<path>...]           "
 			"List volumes\n"
+		"    bulkfree <path>                   "
+			"Run bulkfree pass\n"
 		"    printinode <path>                 "
 			"Dump inode\n"
 	);

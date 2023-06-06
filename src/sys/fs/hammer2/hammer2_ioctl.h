@@ -91,6 +91,22 @@ struct hammer2_ioc_inode {
 typedef struct hammer2_ioc_inode hammer2_ioc_inode_t;
 
 /*
+ * Ioctl for bulkfree scan.
+ */
+struct hammer2_ioc_bulkfree {
+	hammer2_off_t		sbase;	/* starting storage offset */
+	hammer2_off_t		sstop;	/* (set on return) */
+	size_t			size;	/* swapable kernel memory to use */
+	hammer2_off_t		count_allocated;	/* alloc fixups this run */
+	hammer2_off_t		count_freed;		/* bytes freed this run */
+	hammer2_off_t		total_fragmented;	/* merged result */
+	hammer2_off_t		total_allocated;	/* merged result */
+	hammer2_off_t		total_scanned;		/* bytes of storage */
+};
+
+typedef struct hammer2_ioc_bulkfree hammer2_ioc_bulkfree_t;
+
+/*
  * Ioctl to manage volumes.
  */
 struct hammer2_ioc_volume {
@@ -114,11 +130,12 @@ typedef struct hammer2_ioc_volume_list hammer2_ioc_volume_list_t;
 /*
  * Ioctl list.
  */
-#define HAMMER2IOC_VERSION_GET	_IOWR('h', 64, struct hammer2_ioc_version)
-#define HAMMER2IOC_PFS_GET	_IOWR('h', 80, struct hammer2_ioc_pfs)
-#define HAMMER2IOC_PFS_LOOKUP	_IOWR('h', 83, struct hammer2_ioc_pfs)
-#define HAMMER2IOC_INODE_GET	_IOWR('h', 86, struct hammer2_ioc_inode)
-#define HAMMER2IOC_DEBUG_DUMP	_IOWR('h', 91, int)
-#define HAMMER2IOC_VOLUME_LIST	_IOWR('h', 97, struct hammer2_ioc_volume_list)
+#define HAMMER2IOC_VERSION_GET		_IOWR('h', 64, struct hammer2_ioc_version)
+#define HAMMER2IOC_PFS_GET		_IOWR('h', 80, struct hammer2_ioc_pfs)
+#define HAMMER2IOC_PFS_LOOKUP		_IOWR('h', 83, struct hammer2_ioc_pfs)
+#define HAMMER2IOC_INODE_GET		_IOWR('h', 86, struct hammer2_ioc_inode)
+#define HAMMER2IOC_DEBUG_DUMP		_IOWR('h', 91, int)
+#define HAMMER2IOC_BULKFREE_SCAN	_IOWR('h', 92, struct hammer2_ioc_bulkfree)
+#define HAMMER2IOC_VOLUME_LIST		_IOWR('h', 97, struct hammer2_ioc_volume_list)
 
 #endif /* !_FS_HAMMER2_IOCTL_H_ */

@@ -184,7 +184,7 @@ hammer2_freemap_alloc(hammer2_chain_t *chain, size_t bytes)
 	 */
 	if (bytes == 0) {
 		bref->data_off = 0;
-		return 0;
+		return (0);
 	}
 
 	KKASSERT(hmp->spmp);

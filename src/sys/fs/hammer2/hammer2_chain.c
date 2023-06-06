@@ -690,6 +690,10 @@ hammer2_chain_drop_data(hammer2_chain_t *chain)
  * the requested resolve types.  Once data is assigned it will not be
  * removed until the last unlock.
  *
+ * HAMMER2_RESOLVE_NEVER - Do not resolve the data element.
+ *			   (typically used to avoid device/logical buffer
+ *			    aliasing for data)
+ *
  * HAMMER2_RESOLVE_MAYBE - Do not resolve data elements for DATA chains.
  *			   (typically used to avoid device/logical buffer
  *			    aliasing for data)
@@ -756,6 +760,8 @@ hammer2_chain_lock(hammer2_chain_t *chain, int how)
 	 * Other bref types expects the data to be there.
 	 */
 	switch (how & HAMMER2_RESOLVE_MASK) {
+	case HAMMER2_RESOLVE_NEVER:
+		return (0);
 	case HAMMER2_RESOLVE_MAYBE:
 		if (chain->bref.type == HAMMER2_BREF_TYPE_DATA)
 			return (0);
@@ -970,7 +976,7 @@ int
 hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
     hammer2_off_t dedup_off, int flags)
 {
-	return (EOPNOTSUPP);
+	return (0);
 }
 
 /*
@@ -1270,6 +1276,8 @@ hammer2_chain_lookup(hammer2_chain_t **parentp, hammer2_key_t *key_nextp,
 	if (flags & HAMMER2_LOOKUP_ALWAYS) {
 		how_maybe = how_always;
 		how = HAMMER2_RESOLVE_ALWAYS;
+	} else if (flags & HAMMER2_LOOKUP_NODATA) {
+		how = HAMMER2_RESOLVE_NEVER;
 	} else {
 		how = HAMMER2_RESOLVE_MAYBE;
 	}
@@ -1299,6 +1307,30 @@ hammer2_chain_lookup(hammer2_chain_t **parentp, hammer2_key_t *key_nextp,
 again:
 	if (--maxloops == 0)
 		hpanic("maxloops");
+
+	/*
+	 * MATCHIND case that does not require parent->data (do prior to
+	 * parent->error check).
+	 */
+	switch (parent->bref.type) {
+	case HAMMER2_BREF_TYPE_FREEMAP_NODE:
+	case HAMMER2_BREF_TYPE_INDIRECT:
+		if (flags & HAMMER2_LOOKUP_MATCHIND) {
+			scan_beg = parent->bref.key;
+			scan_end = scan_beg +
+			    ((hammer2_key_t)1 << parent->bref.keybits) - 1;
+			if (key_beg == scan_beg && key_end == scan_end) {
+				chain = parent;
+				hammer2_chain_ref(chain);
+				hammer2_chain_lock(chain, how_maybe);
+				*key_nextp = scan_end + 1;
+				goto done;
+			}
+		}
+		break;
+	default:
+		break;
+	}
 
 	/*
 	 * No lookup is possible if the parent is errored.  We delayed
@@ -1443,6 +1475,11 @@ again:
 	 * so we can access its data.  It might need a fixup if the caller
 	 * passed incompatible flags.  Be careful not to cause a deadlock
 	 * as a data-load requires an exclusive lock.
+	 *
+	 * If HAMMER2_LOOKUP_MATCHIND is set and the indirect block's key
+	 * range is within the requested key range we return the indirect
+	 * block and do NOT loop.  This is usually only used to acquire
+	 * freemap nodes.
 	 */
 	if (chain->bref.type == HAMMER2_BREF_TYPE_INDIRECT ||
 	    chain->bref.type == HAMMER2_BREF_TYPE_FREEMAP_NODE) {
@@ -1452,7 +1489,7 @@ again:
 		chain = NULL;
 		goto again;
 	}
-
+done:
 	/*
 	 * All done, return the locked chain.
 	 *
@@ -1535,13 +1572,247 @@ hammer2_chain_next(hammer2_chain_t **parentp, hammer2_chain_t *chain,
 	    errorp, flags));
 }
 
+/*
+ * Caller wishes to iterate chains under parent, loading new chains into
+ * chainp.  Caller must initialize *chainp to NULL and *firstp to 1, and
+ * then call hammer2_chain_scan() repeatedly until a non-zero return.
+ * During the scan, *firstp will be set to 0 and (*chainp) will be replaced
+ * with the returned chain for the scan.  The returned *chainp will be
+ * locked and referenced.  Any prior contents will be unlocked and dropped.
+ *
+ * Caller should check the return value.  A normal scan EOF will return
+ * exactly HAMMER2_ERROR_EOF.  Any other non-zero value indicates an
+ * error trying to access parent data.  Any error in the returned chain
+ * must be tested separately by the caller.
+ *
+ * (*chainp) is dropped on each scan, but will only be set if the returned
+ * element itself can recurse.  Leaf elements are NOT resolved, loaded, or
+ * returned via *chainp.  The caller will get their bref only.
+ *
+ * The raw scan function is similar to lookup/next but does not seek to a key.
+ * Blockrefs are iterated via first_bref = (parent, NULL) and
+ * next_chain = (parent, bref).
+ *
+ * The passed-in parent must be locked and its data resolved.  The function
+ * nominally returns a locked and referenced *chainp != NULL for chains
+ * the caller might need to recurse on (and will dipose of any *chainp passed
+ * in).  The caller must check the chain->bref.type either way.
+ */
+int
+hammer2_chain_scan(hammer2_chain_t *parent, hammer2_chain_t **chainp,
+    hammer2_blockref_t *bref, int *firstp, int flags)
+{
+	hammer2_blockref_t *base, *bref_ptr;
+	hammer2_key_t key, next_key;
+	hammer2_chain_t *chain = NULL;
+	int count, how, generation, maxloops, error;
+
+	error = 0;
+	count = 0;
+	maxloops = 300000;
+
+	/* Scan flags borrowed from lookup. */
+	if (flags & HAMMER2_LOOKUP_ALWAYS)
+		how = HAMMER2_RESOLVE_ALWAYS;
+	else if (flags & HAMMER2_LOOKUP_NODATA)
+		how = HAMMER2_RESOLVE_NEVER;
+	else
+		how = HAMMER2_RESOLVE_MAYBE;
+
+	if (flags & HAMMER2_LOOKUP_SHARED)
+		how |= HAMMER2_RESOLVE_SHARED;
+
+	/*
+	 * Calculate key to locate first/next element, unlocking the previous
+	 * element as we go.  Be careful, the key calculation can overflow.
+	 * (also reset bref to NULL)
+	 */
+	if (*firstp) {
+		key = 0;
+		*firstp = 0;
+	} else {
+		key = bref->key + ((hammer2_key_t)1 << bref->keybits);
+		if ((chain = *chainp) != NULL) {
+			*chainp = NULL;
+			hammer2_chain_unlock(chain);
+			hammer2_chain_drop(chain);
+			chain = NULL;
+		}
+		if (key == 0) {
+			error |= HAMMER2_ERROR_EOF;
+			goto done;
+		}
+	}
+
+again:
+	if (parent->error) {
+		error = parent->error;
+		goto done;
+	}
+	if (--maxloops == 0)
+		hpanic("maxloops");
+
+	/*
+	 * Locate the blockref array.
+	 * Currently we do a fully associative search through the array.
+	 */
+	switch (parent->bref.type) {
+	case HAMMER2_BREF_TYPE_INODE:
+		/*
+		 * An inode with embedded data has no sub-chains.
+		 *
+		 * WARNING! Bulk scan code may pass a static chain marked
+		 *	    as BREF_TYPE_INODE with a copy of the volume
+		 *	    root blockset to snapshot the volume.
+		 */
+		if (parent->data->ipdata.meta.op_flags &
+		    HAMMER2_OPFLAG_DIRECTDATA) {
+			error |= HAMMER2_ERROR_EOF;
+			goto done;
+		}
+		base = &parent->data->ipdata.u.blockset.blockref[0];
+		count = HAMMER2_SET_COUNT;
+		break;
+	case HAMMER2_BREF_TYPE_FREEMAP_NODE:
+	case HAMMER2_BREF_TYPE_INDIRECT:
+		/*
+		 * Optimize indirect blocks in the INITIAL state to avoid
+		 * I/O.
+		 */
+		if (parent->flags & HAMMER2_CHAIN_INITIAL) {
+			base = NULL;
+		} else {
+			if (parent->data == NULL)
+				hpanic("parent->data is NULL");
+			base = &parent->data->npdata[0];
+		}
+		count = parent->bytes / sizeof(hammer2_blockref_t);
+		break;
+	case HAMMER2_BREF_TYPE_VOLUME:
+		base = &parent->data->voldata.sroot_blockset.blockref[0];
+		count = HAMMER2_SET_COUNT;
+		break;
+	case HAMMER2_BREF_TYPE_FREEMAP:
+		base = &parent->data->blkset.blockref[0];
+		count = HAMMER2_SET_COUNT;
+		break;
+	default:
+		hpanic("unrecognized blockref type %d", parent->bref.type);
+		base = NULL; /* safety */
+		count = 0; /* safety */
+		break;
+	}
+
+	/*
+	 * Merged scan to find next candidate.
+	 *
+	 * hammer2_base_*() functions require the parent->core.live_* fields
+	 * to be synchronized.
+	 *
+	 * We need to hold the spinlock to access the block array and RB tree
+	 * and to interlock chain creation.
+	 */
+	if ((parent->flags & HAMMER2_CHAIN_COUNTEDBREFS) == 0)
+		hammer2_chain_countbrefs(parent, base, count);
+
+	next_key = 0;
+	bref_ptr = NULL;
+	hammer2_spin_ex(&parent->core.spin);
+	chain = hammer2_combined_find(parent, base, count, &next_key, key,
+	    HAMMER2_KEY_MAX, &bref_ptr);
+	generation = parent->core.generation;
+
+	/* Exhausted parent chain, we're done. */
+	if (bref_ptr == NULL) {
+		hammer2_spin_unex(&parent->core.spin);
+		KKASSERT(chain == NULL);
+		error |= HAMMER2_ERROR_EOF;
+		goto done;
+	}
+
+	/* Copy into the supplied stack-based blockref. */
+	*bref = *bref_ptr;
+
+	/* Selected from blockref or in-memory chain. */
+	if (chain == NULL) {
+		switch (bref->type) {
+		case HAMMER2_BREF_TYPE_INODE:
+		case HAMMER2_BREF_TYPE_FREEMAP_NODE:
+		case HAMMER2_BREF_TYPE_INDIRECT:
+		case HAMMER2_BREF_TYPE_VOLUME:
+		case HAMMER2_BREF_TYPE_FREEMAP:
+			/* Recursion, always get the chain. */
+			hammer2_spin_unex(&parent->core.spin);
+			chain = hammer2_chain_get(parent, generation, bref,
+			    how);
+			if (chain == NULL)
+				goto again;
+			break;
+		default:
+			/*
+			 * No recursion, do not waste time instantiating
+			 * a chain, just iterate using the bref.
+			 */
+			hammer2_spin_unex(&parent->core.spin);
+			break;
+		}
+	} else {
+		/*
+		 * Recursion or not we need the chain in order to supply
+		 * the bref.
+		 */
+		hammer2_chain_ref(chain);
+		hammer2_spin_unex(&parent->core.spin);
+		hammer2_chain_lock(chain, how);
+	}
+	if (chain && (bcmp(bref, &chain->bref, sizeof(*bref)) ||
+	    chain->parent != parent)) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+		chain = NULL;
+		goto again;
+	}
+
+	/*
+	 * Skip deleted chains (XXX cache 'i' end-of-block-array? XXX)
+	 *
+	 * NOTE: chain's key range is not relevant as there might be
+	 *	 one-offs within the range that are not deleted.
+	 *
+	 * NOTE: XXX this could create problems with scans used in
+	 *	 situations other than mount-time recovery.
+	 *
+	 * NOTE: Lookups can race delete-duplicate because
+	 *	 delete-duplicate does not lock the parent's core
+	 *	 (they just use the spinlock on the core).
+	 */
+	if (chain && (chain->flags & HAMMER2_CHAIN_DELETED)) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+		chain = NULL;
+
+		key = next_key;
+		if (key == 0) {
+			error |= HAMMER2_ERROR_EOF;
+			goto done;
+		}
+		goto again;
+	}
+
+done:
+	/* All done, return the bref or NULL, supply chain if necessary. */
+	if (chain)
+		*chainp = chain;
+	return (error);
+}
+
 int
 hammer2_chain_create(hammer2_chain_t **parentp, hammer2_chain_t **chainp,
     hammer2_dev_t *hmp, hammer2_pfs_t *pmp, int methods, hammer2_key_t key,
     int keybits, int type, size_t bytes, hammer2_tid_t mtid,
     hammer2_off_t dedup_off, int flags)
 {
-	return (EOPNOTSUPP);
+	return (HAMMER2_ERROR_EOPNOTSUPP);
 }
 
 /*
@@ -1789,7 +2060,9 @@ hammer2_chain_testcheck(const hammer2_chain_t *chain, void *bdata)
  * *chainp representing the located inode are returned locked.
  *
  * The returned error includes any error on the returned chain in addition to
- * errors incurred while trying to lookup the inode.
+ * errors incurred while trying to lookup the inode.  However, a chain->error
+ * might not be recognized if HAMMER2_LOOKUP_NODATA is passed.  This flag may
+ * not be passed to this function.
  */
 int
 hammer2_chain_inode_find(hammer2_pfs_t *pmp, hammer2_key_t inum, int clindex,
@@ -1799,6 +2072,8 @@ hammer2_chain_inode_find(hammer2_pfs_t *pmp, hammer2_key_t inum, int clindex,
 	hammer2_chain_t *parent, *rchain;
 	hammer2_key_t key_dummy;
 	int resolve_flags, error;
+
+	KKASSERT((flags & HAMMER2_LOOKUP_NODATA) == 0);
 
 	resolve_flags = (flags & HAMMER2_LOOKUP_SHARED) ?
 	    HAMMER2_RESOLVE_SHARED : 0;
@@ -1878,6 +2153,37 @@ hammer2_chain_inode_find(hammer2_pfs_t *pmp, hammer2_key_t inum, int clindex,
 	*chainp = rchain;
 
 	return (error);
+}
+
+/*
+ * Used by the bulkscan code to snapshot the synchronized storage for
+ * a volume, allowing it to be scanned concurrently against normal
+ * operation.
+ */
+hammer2_chain_t *
+hammer2_chain_bulksnap(hammer2_dev_t *hmp)
+{
+	hammer2_chain_t *copy;
+
+	copy = hammer2_chain_alloc(hmp, hmp->spmp, &hmp->vchain.bref);
+	copy->data = malloc(sizeof(copy->data->voldata), M_HAMMER2,
+	    M_WAITOK | M_ZERO);
+	hammer2_voldata_lock(hmp);
+	copy->data->voldata = hmp->volsync;
+	hammer2_voldata_unlock(hmp);
+
+	return (copy);
+}
+
+void
+hammer2_chain_bulkdrop(hammer2_chain_t *copy)
+{
+	KKASSERT(copy->bref.type == HAMMER2_BREF_TYPE_VOLUME);
+	KKASSERT(copy->data);
+
+	free(copy->data, M_HAMMER2, 0);
+	copy->data = NULL;
+	hammer2_chain_drop(copy);
 }
 
 /*

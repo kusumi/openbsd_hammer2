@@ -1,3 +1,8 @@
+v1.1.1
+======
+- Add pseudo bulkfree
+- Add hammer2(8) bulkfree directive
+
 v1.1.0
 ======
 - Add fchain

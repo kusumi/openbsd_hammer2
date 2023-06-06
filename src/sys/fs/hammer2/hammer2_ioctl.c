@@ -275,6 +275,97 @@ hammer2_ioctl_debug_dump(hammer2_inode_t *ip, unsigned int flags)
 }
 
 /*
+ * Do a bulkfree scan on media related to the PFS.  This routine will
+ * flush all PFSs associated with the media before doing the bulkfree
+ * scan.
+ *
+ * This version can only run on non-clustered media.  A new ioctl or a
+ * temporary mount of @LOCAL will be needed to run on clustered media.
+ */
+static
+int
+hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
+{
+	hammer2_ioc_bulkfree_t *bfi = data;
+	hammer2_dev_t *hmp;
+	hammer2_pfs_t *pmp;
+	hammer2_chain_t *vchain;
+	int error = 0, didsnap, etmp, i;
+
+	pmp = ip->pmp;
+	ip = pmp->iroot;
+
+	hmp = pmp->pfs_hmps[0];
+	if (hmp == NULL)
+		return (EINVAL);
+	if (bfi == NULL)
+		return (EINVAL);
+
+	/*
+	 * Bulkfree has to be serialized to guarantee at least one sync
+	 * inbetween bulkfrees.
+	 */
+	rw_enter_write(&hmp->bflk);
+
+	/* Sync all mounts related to the media. */
+	rw_enter_write(&hammer2_mntlk);
+	TAILQ_FOREACH(pmp, &hammer2_pfslist, mntentry) {
+		for (i = 0; i < HAMMER2_MAXCLUSTER; ++i) {
+			if (pmp->pfs_hmps[i] != hmp)
+				continue;
+			etmp = hammer2_vfs_sync_pmp(pmp, MNT_WAIT);
+			if (etmp && (error == 0 || error == ENOSPC))
+				error = etmp;
+			break;
+		}
+	}
+	rw_exit_write(&hammer2_mntlk);
+
+	if (error && error != ENOSPC)
+		goto failed;
+
+	/*
+	 * If we have an ENOSPC error we have to bulkfree on the live
+	 * topology.  Otherwise we can bulkfree on a snapshot.
+	 */
+	if (error) {
+		hprintf("WARNING: bulkfree forced to use live topology due to "
+		    "ENOSPC\n");
+		vchain = &hmp->vchain;
+		hammer2_chain_ref(vchain);
+		didsnap = 0;
+	} else {
+		vchain = hammer2_chain_bulksnap(hmp);
+		didsnap = 1;
+	}
+
+	/*
+	 * Normal bulkfree operations do not require a transaction because
+	 * they operate on a snapshot, and so can run concurrently with
+	 * any operation except another bulkfree.
+	 *
+	 * If we are running bulkfree on the live topology we have to be
+	 * in a FLUSH transaction.
+	 */
+	if (didsnap == 0)
+		hammer2_trans_init(hmp->spmp, HAMMER2_TRANS_ISFLUSH);
+
+	error = hammer2_bulkfree_pass(hmp, vchain, bfi);
+	if (didsnap) {
+		hammer2_chain_bulkdrop(vchain);
+	} else {
+		hammer2_chain_drop(vchain);
+		hammer2_trans_done(hmp->spmp, HAMMER2_TRANS_ISFLUSH |
+		    HAMMER2_TRANS_SIDEQ);
+	}
+	error = hammer2_error_to_errno(error);
+
+failed:
+	rw_exit_write(&hmp->bflk);
+	return (error);
+}
+
+/*
  * Get a list of volumes.
  */
 static int
@@ -333,6 +424,9 @@ hammer2_ioctl_impl(hammer2_inode_t *ip, unsigned long com, void *data,
 		break;
 	case HAMMER2IOC_DEBUG_DUMP:
 		error = hammer2_ioctl_debug_dump(ip, *(unsigned int *)data);
+		break;
+	case HAMMER2IOC_BULKFREE_SCAN:
+		error = hammer2_ioctl_bulkfree_scan(ip, data);
 		break;
 	case HAMMER2IOC_VOLUME_LIST:
 		error = hammer2_ioctl_volume_list(ip, data);

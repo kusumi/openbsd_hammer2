@@ -1,5 +1,5 @@
 diff --git a/distrib/sets/lists/comp/mi b/distrib/sets/lists/comp/mi
-index 85cf423..d6c4c40 100644
+index 85cf42336..d6c4c4035 100644
 --- a/distrib/sets/lists/comp/mi
 +++ b/distrib/sets/lists/comp/mi
 @@ -908,6 +908,10 @@
@@ -14,7 +14,7 @@ index 85cf423..d6c4c40 100644
  ./usr/include/icdb.h
  ./usr/include/ifaddrs.h
 diff --git a/sbin/sysctl/Makefile b/sbin/sysctl/Makefile
-index 6454e1d..ce5e90f 100644
+index 6454e1dc8..ce5e90f9c 100644
 --- a/sbin/sysctl/Makefile
 +++ b/sbin/sysctl/Makefile
 @@ -4,6 +4,7 @@ PROG=	sysctl
@@ -26,7 +26,7 @@ index 6454e1d..ce5e90f 100644
  afterinstall:
  	ln -sf ../../sbin/sysctl ${DESTDIR}/usr/sbin
 diff --git a/sbin/sysctl/sysctl.c b/sbin/sysctl/sysctl.c
-index e7ce921..9ac03a9 100644
+index e7ce92199..9ac03a992 100644
 --- a/sbin/sysctl/sysctl.c
 +++ b/sbin/sysctl/sysctl.c
 @@ -91,6 +91,8 @@
@@ -58,7 +58,7 @@ index e7ce921..9ac03a9 100644
  		strlcat(&names[loc], vfc.vfc_name, sizeof names - loc);
  		vfsname[cnt].ctl_name = &names[loc];
 diff --git a/sys/conf/GENERIC b/sys/conf/GENERIC
-index f7bb589..5e57732 100644
+index f7bb589c8..5e57732c5 100644
 --- a/sys/conf/GENERIC
 +++ b/sys/conf/GENERIC
 @@ -42,6 +42,7 @@ option		MSDOSFS		# MS-DOS file system
@@ -70,14 +70,15 @@ index f7bb589..5e57732 100644
  option		SOCKET_SPLICE	# Socket Splicing for TCP and UDP
  option		TCP_ECN		# Explicit Congestion Notification for TCP
 diff --git a/sys/conf/files b/sys/conf/files
-index 6611400..7f90b5f 100644
+index 661140040..2bb78275c 100644
 --- a/sys/conf/files
 +++ b/sys/conf/files
-@@ -804,6 +804,22 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
+@@ -804,6 +804,23 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
  file tmpfs/tmpfs_vnops.c		tmpfs
  file tmpfs/tmpfs_specops.c		tmpfs
  file tmpfs/tmpfs_fifoops.c		tmpfs & fifo
 +file hammer2/hammer2_admin.c		hammer2
++file hammer2/hammer2_bulkfree.c		hammer2
 +file hammer2/hammer2_chain.c		hammer2
 +file hammer2/hammer2_cluster.c		hammer2
 +file hammer2/hammer2_flush.c		hammer2
@@ -96,7 +97,7 @@ index 6611400..7f90b5f 100644
  file net/art.c
  file net/bpf.c				bpfilter		needs-count
  file net/bpf_filter.c			bpfilter
-@@ -1041,6 +1057,7 @@ file lib/libkern/getsn.c
+@@ -1041,6 +1058,7 @@ file lib/libkern/getsn.c
  file lib/libkern/random.c
  file lib/libkern/explicit_bzero.c
  file lib/libkern/timingsafe_bcmp.c
@@ -105,7 +106,7 @@ index 6611400..7f90b5f 100644
  file lib/libkern/arch/${MACHINE_ARCH}/strrchr.S | lib/libkern/strrchr.c
  file lib/libkern/arch/${MACHINE_ARCH}/imax.S | lib/libkern/imax.c
 diff --git a/sys/kern/vfs_init.c b/sys/kern/vfs_init.c
-index 84c00f0..59715d5 100644
+index 84c00f0e4..59715d5d8 100644
 --- a/sys/kern/vfs_init.c
 +++ b/sys/kern/vfs_init.c
 @@ -100,6 +100,11 @@ static struct vfsconf vfsconflist[] = {
@@ -121,7 +122,7 @@ index 84c00f0..59715d5 100644
  
  
 diff --git a/sys/kern/vfs_vnops.c b/sys/kern/vfs_vnops.c
-index e6a175e..f3c491b 100644
+index e6a175e9f..f3c491bf3 100644
 --- a/sys/kern/vfs_vnops.c
 +++ b/sys/kern/vfs_vnops.c
 @@ -517,7 +517,8 @@ vn_ioctl(struct file *fp, u_long com, caddr_t data, struct proc *p)
@@ -135,7 +136,7 @@ index e6a175e..f3c491b 100644
  	case VFIFO:
  	case VCHR:
 diff --git a/sys/sys/malloc.h b/sys/sys/malloc.h
-index 97bf9ff..4f8b6fd 100644
+index 97bf9ff60..4f8b6fd6f 100644
 --- a/sys/sys/malloc.h
 +++ b/sys/sys/malloc.h
 @@ -177,7 +177,11 @@
@@ -162,7 +163,7 @@ index 97bf9ff..4f8b6fd 100644
  
  struct kmemstats {
 diff --git a/sys/sys/mount.h b/sys/sys/mount.h
-index 40c12e9..d18fa04 100644
+index 40c12e976..d18fa04b4 100644
 --- a/sys/sys/mount.h
 +++ b/sys/sys/mount.h
 @@ -257,6 +257,15 @@ struct fusefs_args {
@@ -206,7 +207,7 @@ index 40c12e9..d18fa04 100644
  #include <net/radix.h>
  #include <sys/socket.h>		/* XXX for AF_MAX */
 diff --git a/sys/sys/vnode.h b/sys/sys/vnode.h
-index 30787af..19c4fb1 100644
+index 30787afdd..19c4fb12f 100644
 --- a/sys/sys/vnode.h
 +++ b/sys/sys/vnode.h
 @@ -67,12 +67,14 @@ enum vtagtype	{

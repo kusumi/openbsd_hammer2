@@ -2,11 +2,10 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
- * Copyright (c) 2011-2012 The DragonFly Project.  All rights reserved.
+ * Copyright (c) 2015 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
  * by Matthew Dillon <dillon@dragonflybsd.org>
- * by Venkatesh Srinivas <vsrinivas@dragonflybsd.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -36,69 +35,37 @@
  * SUCH DAMAGE.
  */
 
-#ifndef HAMMER2_HAMMER2_H_
-#define HAMMER2_HAMMER2_H_
+#include "hammer2.h"
 
-/*
- * Rollup headers for hammer2 utility
- */
-#include <sys/param.h>
-#include <sys/mount.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-#include <sys/stat.h>
-#include <sys/sysctl.h>
-#include <sys/disk.h>
-#include <sys/ioctl.h>
-#include <dirent.h>
+int
+cmd_bulkfree(const char *sel_path)
+{
+	hammer2_ioc_bulkfree_t bfi;
+	int ecode = 0;
+	int fd;
+	int res;
+	int mib[] = { CTL_HW, HW_USERMEM64 };
+	long long usermem;
+	size_t usermem_size = sizeof(usermem);
 
-#include <fs/hammer2/hammer2_disk.h>
-#include <fs/hammer2/hammer2_mount.h>
-#include <fs/hammer2/hammer2_ioctl.h>
-#include <fs/hammer2/hammer2_xxhash.h>
+	bzero(&bfi, sizeof(bfi));
+	usermem = 0;
+	if (sysctl(mib, 2, &usermem, &usermem_size, NULL, 0) == 0)
+		bfi.size = usermem / 16;
+	else
+		bfi.size = 0;
+	if (bfi.size < 8192 * 1024)
+		bfi.size = 8192 * 1024;
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdarg.h>
-#include <stddef.h>
-#include <stdint.h>
+	if (MemOpt)
+		bfi.size = (MemOpt + 8192 * 1024 - 1) & ~(8192 * 1024 - 1L);
 
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <string.h>
-#include <unistd.h>
-#include <ctype.h>
-#include <uuid.h>
-#include <assert.h>
-
-#include "hammer2_subs.h"
-
-/* user-specifiable check modes only */
-#define HAMMER2_CHECK_STRINGS		{ "none", "disabled", "crc32", \
-					  "xxhash64", "sha192" }
-#define HAMMER2_CHECK_STRINGS_COUNT	5
-
-#define HAMMER2_COMP_STRINGS		{ "none", "autozero", "lz4", "zlib" }
-#define HAMMER2_COMP_STRINGS_COUNT	4
-
-extern int VerboseOpt;
-extern int QuietOpt;
-extern size_t MemOpt;
-
-/*
- * Hammer2 command APIs
- */
-int cmd_pfs_getid(const char *sel_path, const char *name, int privateid);
-int cmd_pfs_list(int ac, char **av);
-int cmd_info(int ac, const char **av);
-int cmd_mountall(int ac, const char **av);
-int cmd_stat(int ac, const char **av);
-int cmd_dumpchain(const char *path, u_int flags);
-int cmd_show(const char *devpath, int which);
-int cmd_volume_list(int ac, char **av);
-int cmd_bulkfree(const char *dir_path);
-
-void print_inode(const char *path);
-
-#endif /* !HAMMER2_HAMMER2_H_ */
+	if ((fd = hammer2_ioctl_handle(sel_path)) < 0)
+		return 1;
+	res = ioctl(fd, HAMMER2IOC_BULKFREE_SCAN, &bfi);
+	if (res) {
+		perror("ioctl");
+		ecode = 1;
+	}
+	return ecode;
+}

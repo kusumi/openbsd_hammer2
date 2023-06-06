@@ -76,6 +76,7 @@
 
 #include "hammer2_compat.h"
 #include "hammer2_disk.h"
+#include "hammer2_ioctl.h"
 #include "hammer2_rb.h"
 
 /* printf(9) variants for HAMMER2 */
@@ -179,6 +180,13 @@ RB_HEAD(hammer2_chain_tree, hammer2_chain); /* <-> hammer2_chain::rbnode */
 typedef struct hammer2_chain_tree hammer2_chain_tree_t;
 
 /*
+ * Cap the dynamic calculation for the maximum number of dirty
+ * chains and dirty inodes allowed.
+ */
+#define HAMMER2_LIMIT_DIRTY_CHAINS	(1024*1024)
+#define HAMMER2_LIMIT_DIRTY_INODES	(65536)
+
+/*
  * HAMMER2 dio - Management structure wrapping system buffer cache.
  *
  * HAMMER2 uses an I/O abstraction that allows it to cache and manipulate
@@ -260,6 +268,8 @@ struct hammer2_chain {
 #define HAMMER2_CHAIN_MODIFIED		0x00000001	/* dirty chain data */
 #define HAMMER2_CHAIN_ALLOCATED		0x00000002	/* kmalloc'd chain */
 #define HAMMER2_CHAIN_DESTROY		0x00000004
+#define HAMMER2_CHAIN_DELETED		0x00000010	/* deleted chain */
+#define HAMMER2_CHAIN_INITIAL		0x00000020	/* initial create */
 #define HAMMER2_CHAIN_TESTEDGOOD	0x00000100	/* crc tested good */
 #define HAMMER2_CHAIN_COUNTEDBREFS	0x00002000	/* block table stats */
 #define HAMMER2_CHAIN_ONRBTREE		0x00004000	/* on parent RB tree */
@@ -293,11 +303,15 @@ struct hammer2_chain {
 #define HAMMER2_ERROR_ENOENT		0x00000040	/* entry not found */
 #define HAMMER2_ERROR_EAGAIN		0x00000100	/* retry */
 #define HAMMER2_ERROR_ABORTED		0x00001000	/* aborted operation */
+#define HAMMER2_ERROR_EOF		0x00002000	/* end of scan */
+#define HAMMER2_ERROR_EOPNOTSUPP	0x10000000	/* unsupported */
 
 /*
  * Flags passed to hammer2_chain_lookup() and hammer2_chain_next().
  *
  * NOTES:
+ *	NODATA	    - Asks that the chain->data not be resolved in order
+ *		      to avoid I/O.
  *	SHARED	    - The input chain is expected to be locked shared,
  *		      and the output chain is locked shared.
  *	MATCHIND    - Allows an indirect block / freemap node to be returned
@@ -307,6 +321,7 @@ struct hammer2_chain {
  *		      (Cannot be used for remote or cluster ops).
  *	ALWAYS	    - Always resolve the data.
  */
+#define HAMMER2_LOOKUP_NODATA		0x00000002	/* data left NULL */
 #define HAMMER2_LOOKUP_SHARED		0x00000100
 #define HAMMER2_LOOKUP_MATCHIND		0x00000200	/* return all chains */
 #define HAMMER2_LOOKUP_ALWAYS		0x00000800	/* resolve data */
@@ -314,6 +329,7 @@ struct hammer2_chain {
 /*
  * Flags passed to hammer2_chain_lock().
  */
+#define HAMMER2_RESOLVE_NEVER		1
 #define HAMMER2_RESOLVE_MAYBE		2
 #define HAMMER2_RESOLVE_ALWAYS		3
 #define HAMMER2_RESOLVE_MASK		0x0F
@@ -381,10 +397,28 @@ struct hammer2_inode {
 /*
  * Transaction management sub-structure under hammer2_pfs.
  */
+#define HAMMER2_TRANS_ISFLUSH		0x80000000	/* flush code */
+#define HAMMER2_TRANS_SIDEQ		0x20000000	/* run sideq */
+
 #define HAMMER2_FREEMAP_HEUR_NRADIX	4	/* pwr 2 PBUFRADIX-LBUFRADIX */
 #define HAMMER2_FREEMAP_HEUR_TYPES	8
 #define HAMMER2_FREEMAP_HEUR_SIZE	(HAMMER2_FREEMAP_HEUR_NRADIX * \
 					 HAMMER2_FREEMAP_HEUR_TYPES)
+
+#define HAMMER2_DEDUP_HEUR_SIZE		(65536 * 4)
+#define HAMMER2_DEDUP_HEUR_MASK		(HAMMER2_DEDUP_HEUR_SIZE - 1)
+
+/*
+ * Support structure for dedup heuristic.
+ */
+struct hammer2_dedup {
+	hammer2_off_t		data_off;
+	uint64_t		data_crc;
+	uint32_t		ticks;
+	uint32_t		saved_error;
+};
+
+typedef struct hammer2_dedup hammer2_dedup_t;
 
 /*
  * HAMMER2 XOP - container for VOP/XOP operation.
@@ -520,6 +554,7 @@ struct hammer2_dev {
 	hammer2_chain_t		vchain;		/* anchor chain (topology) */
 	hammer2_chain_t		fchain;		/* anchor chain (freemap) */
 	hammer2_volume_data_t	voldata;
+	hammer2_volume_data_t	volsync;	/* synchronized voldata */
 	hammer2_volume_t	volumes[HAMMER2_MAX_VOLUMES]; /* list of volumes */
 	hammer2_off_t		total_size;	/* total size of volumes */
 	uint32_t		hflags;		/* HMNT2 flags applicable to device */
@@ -527,8 +562,10 @@ struct hammer2_dev {
 	int			nvolumes;	/* total number of volumes */
 	int			iofree_count;
 	struct rwlock		vollk;		/* lockmgr lock */
+	struct rwlock		bflk;		/* bulk-free manual function lock */
 	int			freemap_relaxed;
 	hammer2_off_t		heur_freemap[HAMMER2_FREEMAP_HEUR_SIZE];
+	hammer2_dedup_t		heur_dedup[HAMMER2_DEDUP_HEUR_SIZE];
 };
 
 /*
@@ -591,10 +628,18 @@ struct hammer2_pfs {
 extern struct pool hammer2_inode_pool;
 extern struct pool hammer2_xops_pool;
 
+TAILQ_HEAD(hammer2_pfslist, hammer2_pfs); /* <-> hammer2_pfs::mntentry */
+typedef struct hammer2_pfslist hammer2_pfslist_t;
+extern struct hammer2_pfslist hammer2_pfslist;
+
+extern struct rwlock hammer2_mntlk;
+
 extern int hammer2_inode_allocs;
 extern int hammer2_chain_allocs;
 extern int hammer2_dio_allocs;
 extern int hammer2_dio_limit;
+extern int hammer2_limit_scan_depth;
+extern int hammer2_limit_saved_chains;
 
 extern const struct vops hammer2_vops;
 extern const struct vops hammer2_specvops;
@@ -616,6 +661,10 @@ void hammer2_xop_retire(hammer2_xop_head_t *, uint32_t);
 int hammer2_xop_feed(hammer2_xop_head_t *, hammer2_chain_t *, int, int);
 int hammer2_xop_collect(hammer2_xop_head_t *, int);
 
+/* hammer2_bulkfree.c */
+int hammer2_bulkfree_pass(hammer2_dev_t *, hammer2_chain_t *,
+    struct hammer2_ioc_bulkfree *);
+
 /* hammer2_chain.c */
 void hammer2_chain_init(hammer2_chain_t *);
 void hammer2_chain_ref(hammer2_chain_t *);
@@ -633,11 +682,15 @@ hammer2_chain_t *hammer2_chain_lookup(hammer2_chain_t **, hammer2_key_t *,
     hammer2_key_t, hammer2_key_t, int *, int);
 hammer2_chain_t *hammer2_chain_next(hammer2_chain_t **, hammer2_chain_t *,
     hammer2_key_t *, hammer2_key_t, hammer2_key_t, int *, int);
+int hammer2_chain_scan(hammer2_chain_t *, hammer2_chain_t **,
+    hammer2_blockref_t *, int *, int);
 int hammer2_chain_create(hammer2_chain_t **, hammer2_chain_t **,
     hammer2_dev_t *, hammer2_pfs_t *, int, hammer2_key_t, int, int, size_t,
     hammer2_tid_t, hammer2_off_t, int);
 int hammer2_chain_inode_find(hammer2_pfs_t *, hammer2_key_t, int, int,
     hammer2_chain_t **, hammer2_chain_t **);
+hammer2_chain_t *hammer2_chain_bulksnap(hammer2_dev_t *);
+void hammer2_chain_bulkdrop(hammer2_chain_t *);
 int hammer2_chain_dirent_test(const hammer2_chain_t *, const char *, size_t);
 void hammer2_dump_chain(hammer2_chain_t *, int, int, int *, char, unsigned int);
 
@@ -650,7 +703,9 @@ void hammer2_cluster_rehold(hammer2_cluster_t *);
 int hammer2_cluster_check(hammer2_cluster_t *, hammer2_key_t, int);
 
 /* hammer2_flush.c */
+void hammer2_trans_init(hammer2_pfs_t *, uint32_t);
 hammer2_tid_t hammer2_trans_sub(hammer2_pfs_t *);
+void hammer2_trans_done(hammer2_pfs_t *, uint32_t);
 
 /* hammer2_freemap.c */
 int hammer2_freemap_alloc(hammer2_chain_t *, size_t);
@@ -681,6 +736,9 @@ int hammer2_io_newnz(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
 int hammer2_io_bread(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
 void hammer2_io_bqrelse(hammer2_io_t **);
 void hammer2_io_dedup_set(hammer2_dev_t *, hammer2_blockref_t *);
+void hammer2_io_dedup_delete(hammer2_dev_t *, uint8_t, hammer2_off_t,
+    unsigned int);
+void hammer2_io_dedup_assert(hammer2_dev_t *, hammer2_off_t, unsigned int);
 
 /* hammer2_ioctl.c */
 int hammer2_ioctl_impl(hammer2_inode_t *, unsigned long, void *, int,
@@ -700,6 +758,7 @@ hammer2_volume_t *hammer2_get_volume(hammer2_dev_t *, hammer2_off_t);
 /* hammer2_strategy.c */
 int hammer2_strategy(void *v);
 void hammer2_xop_strategy_read(hammer2_xop_t *, int);
+void hammer2_dedup_clear(hammer2_dev_t *);
 
 /* hammer2_subr.c */
 int hammer2_get_dtype(uint8_t);
@@ -711,11 +770,13 @@ int hammer2_getradix(size_t);
 int hammer2_calc_logical(hammer2_inode_t *, hammer2_off_t, hammer2_key_t *,
     hammer2_key_t *);
 int hammer2_get_logical(void);
+int hammer2_signal_check(void);
 const char *hammer2_breftype_to_str(uint8_t);
 char *kstrdup(const char *);
 void kstrfree(char *);
 
 /* hammer2_vfsops.c */
+int hammer2_vfs_sync_pmp(hammer2_pfs_t *, int);
 void hammer2_pfs_memory_inc(hammer2_pfs_t *);
 void hammer2_voldata_lock(hammer2_dev_t *);
 void hammer2_voldata_unlock(hammer2_dev_t *);
@@ -747,6 +808,8 @@ hammer2_error_to_errno(int error)
 		return (EAGAIN);
 	else if (error & HAMMER2_ERROR_ABORTED)
 		return (EINTR);
+	else if (error & HAMMER2_ERROR_EOPNOTSUPP)
+		return (EOPNOTSUPP);
 	else
 		return (EDOM);
 }
