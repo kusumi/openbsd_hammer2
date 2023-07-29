@@ -41,6 +41,33 @@
 #include "hammer2.h"
 
 /*
+ * Backend for hammer2_vfs_root().
+ *
+ * This is called when a newly mounted PFS has not yet synchronized
+ * to the inode_tid and modify_tid.
+ */
+void
+hammer2_xop_ipcluster(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_ipcluster_t *xop = &arg->xop_ipcluster;
+	hammer2_chain_t *chain;
+	int error;
+
+	chain = hammer2_inode_chain(xop->head.ip1, clindex,
+	    HAMMER2_RESOLVE_ALWAYS | HAMMER2_RESOLVE_SHARED);
+	if (chain)
+		error = chain->error;
+	else
+		error = HAMMER2_ERROR_EIO;
+
+	hammer2_xop_feed(&xop->head, chain, clindex, error);
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+	}
+}
+
+/*
  * Backend for hammer2_readdir().
  */
 void
@@ -245,4 +272,95 @@ done:
 		hammer2_chain_unlock(parent);
 		hammer2_chain_drop(parent);
 	}
+}
+
+/*
+ * Synchronize the in-memory inode with the chain.  This does not flush
+ * the chain to disk.  Instead, it makes front-end inode changes visible
+ * in the chain topology, thus visible to the backend.  This is done in an
+ * ad-hoc manner outside of the filesystem vfs_sync, and in a controlled
+ * manner inside the vfs_sync.
+ */
+void
+hammer2_xop_inode_chain_sync(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_fsync_t *xop = &arg->xop_fsync;
+	hammer2_chain_t *parent, *chain = NULL;
+	hammer2_key_t lbase, key_next;
+	int error = 0;
+
+	parent = hammer2_inode_chain(xop->head.ip1, clindex,
+	    HAMMER2_RESOLVE_ALWAYS);
+	if (parent == NULL) {
+		error = HAMMER2_ERROR_EIO;
+		goto done;
+	}
+	if (parent->error) {
+		error = parent->error;
+		goto done;
+	}
+
+	if ((xop->ipflags & HAMMER2_INODE_RESIZED) == 0) {
+		/* osize must be ignored */
+	} else if (xop->meta.size < xop->osize) {
+		/*
+		 * We must delete any chains beyond the EOF.  The chain
+		 * straddling the EOF will be pending in the bioq.
+		 */
+		lbase = (xop->meta.size + HAMMER2_PBUFMASK64) &
+		    ~HAMMER2_PBUFMASK64;
+		chain = hammer2_chain_lookup(&parent, &key_next, lbase,
+		    HAMMER2_KEY_MAX, &error,
+		    HAMMER2_LOOKUP_NODATA | HAMMER2_LOOKUP_NODIRECT);
+		while (chain) {
+			/* Degenerate embedded case, nothing to loop on. */
+			switch (chain->bref.type) {
+			case HAMMER2_BREF_TYPE_DIRENT:
+			case HAMMER2_BREF_TYPE_INODE:
+				KKASSERT(0);
+				break;
+			case HAMMER2_BREF_TYPE_DATA:
+				hammer2_chain_delete(parent, chain,
+				    xop->head.mtid, HAMMER2_DELETE_PERMANENT);
+				break;
+			}
+			chain = hammer2_chain_next(&parent, chain, &key_next,
+			    key_next, HAMMER2_KEY_MAX, &error,
+			    HAMMER2_LOOKUP_NODATA | HAMMER2_LOOKUP_NODIRECT);
+		}
+
+		/* Reset to point at inode for following code, if necessary. */
+		if (parent->bref.type != HAMMER2_BREF_TYPE_INODE) {
+			hammer2_chain_unlock(parent);
+			hammer2_chain_drop(parent);
+			parent = hammer2_inode_chain(xop->head.ip1, clindex,
+			    HAMMER2_RESOLVE_ALWAYS);
+			hprintf("truncate reset on '%s'\n",
+			    parent->data->ipdata.filename);
+		}
+	}
+
+	/*
+	 * Sync the inode meta-data, potentially clear the blockset area
+	 * of direct data so it can be used for blockrefs.
+	 */
+	if (error == 0) {
+		error = hammer2_chain_modify(parent, xop->head.mtid, 0, 0);
+		if (error == 0) {
+			parent->data->ipdata.meta = xop->meta;
+			if (xop->clear_directdata)
+				bzero(&parent->data->ipdata.u.blockset,
+				    sizeof(parent->data->ipdata.u.blockset));
+		}
+	}
+done:
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+	}
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+	}
+	hammer2_xop_feed(&xop->head, NULL, clindex, error);
 }

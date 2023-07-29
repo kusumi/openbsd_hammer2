@@ -588,3 +588,76 @@ hammer2_inode_inode_count(const hammer2_inode_t *ip)
 
 	return (count);
 }
+
+/*
+ * Synchronize the inode's frontend state with the chain state prior
+ * to any explicit flush of the inode or any strategy write call.  This
+ * does not flush the inode's chain or its sub-topology to media (higher
+ * level layers are responsible for doing that).
+ *
+ * Called with a locked inode inside a normal transaction.
+ * Inode must be locked.
+ */
+int
+hammer2_inode_chain_sync(hammer2_inode_t *ip)
+{
+	hammer2_xop_fsync_t *xop;
+	int error = 0;
+
+	if (ip->flags & (HAMMER2_INODE_RESIZED | HAMMER2_INODE_MODIFIED)) {
+		xop = hammer2_xop_alloc(ip, HAMMER2_XOP_MODIFYING);
+		xop->clear_directdata = 0;
+		if (ip->flags & HAMMER2_INODE_RESIZED) {
+			if ((ip->meta.op_flags & HAMMER2_OPFLAG_DIRECTDATA) &&
+			    ip->meta.size > HAMMER2_EMBEDDED_BYTES) {
+				ip->meta.op_flags &= ~HAMMER2_OPFLAG_DIRECTDATA;
+				xop->clear_directdata = 1;
+			}
+			xop->osize = ip->osize;
+		} else {
+			xop->osize = ip->meta.size; /* safety */
+		}
+		xop->ipflags = ip->flags;
+		xop->meta = ip->meta;
+
+		atomic_clear_int(&ip->flags,
+		    HAMMER2_INODE_RESIZED | HAMMER2_INODE_MODIFIED);
+		hammer2_xop_start(&xop->head, &hammer2_inode_chain_sync_desc);
+		error = hammer2_xop_collect(&xop->head, 0);
+		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+		if (error == HAMMER2_ERROR_ENOENT)
+			error = 0;
+		if (error) {
+			hprintf("unable to fsync inode %ld\n",
+			    (long)ip->meta.inum);
+			/* XXX return error somehow? */
+		}
+	}
+
+	return (error);
+}
+
+/*
+ * Flushes the inode's chain and its sub-topology to media.  Interlocks
+ * HAMMER2_INODE_DIRTYDATA by clearing it prior to the flush.  Any strategy
+ * function creating or modifying a chain under this inode will re-set the
+ * flag.
+ *
+ * Inode must be locked.
+ */
+int
+hammer2_inode_chain_flush(hammer2_inode_t *ip, int flags)
+{
+	hammer2_xop_flush_t *xop;
+	int error;
+
+	atomic_clear_int(&ip->flags, HAMMER2_INODE_DIRTYDATA);
+	xop = hammer2_xop_alloc(ip, HAMMER2_XOP_MODIFYING | flags);
+	hammer2_xop_start(&xop->head, &hammer2_inode_flush_desc);
+	error = hammer2_xop_collect(&xop->head, HAMMER2_XOP_COLLECT_WAITALL);
+	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+	if (error == HAMMER2_ERROR_ENOENT)
+		error = 0;
+
+	return (error);
+}

@@ -48,10 +48,13 @@
 		.id = #label					\
 	}
 
+H2XOPDESCRIPTOR(ipcluster);
 H2XOPDESCRIPTOR(readdir);
 H2XOPDESCRIPTOR(nresolve);
 H2XOPDESCRIPTOR(lookup);
 H2XOPDESCRIPTOR(bmap);
+H2XOPDESCRIPTOR(inode_chain_sync);
+H2XOPDESCRIPTOR(inode_flush);
 H2XOPDESCRIPTOR(strategy_read);
 
 /*
@@ -108,7 +111,7 @@ hammer2_xop_fifo_alloc(hammer2_xop_fifo_t *fifo, size_t new_nmemb,
  * and can be retired early if desired.
  */
 void *
-hammer2_xop_alloc(hammer2_inode_t *ip)
+hammer2_xop_alloc(hammer2_inode_t *ip, int flags)
 {
 	hammer2_xop_t *xop;
 
@@ -116,6 +119,13 @@ hammer2_xop_alloc(hammer2_inode_t *ip)
 	KKASSERT(xop->head.cluster.array[0].chain == NULL);
 
 	xop->head.ip1 = ip;
+	xop->head.flags = flags;
+
+	if (flags & HAMMER2_XOP_MODIFYING)
+		xop->head.mtid = hammer2_trans_sub(ip->pmp);
+	else
+		xop->head.mtid = 0;
+
 	xop->head.cluster.nchains = ip->cluster.nchains;
 	xop->head.cluster.pmp = ip->pmp;
 	hammer2_assert_cluster(&ip->cluster);
@@ -178,11 +188,11 @@ xop_testset_ipdep(hammer2_inode_t *ip)
 	rw_assert_wrlock(&ip->pmp->xop_lock);
 
 	ipdep = &ip->pmp->ipdep_lists[xop_ipdep_value(ip)];
-	LIST_FOREACH(iptmp, ipdep, entry)
+	LIST_FOREACH(iptmp, ipdep, ientry)
 		if (iptmp == ip)
 			return (1); /* collision */
 
-	LIST_INSERT_HEAD(ipdep, ip, entry);
+	LIST_INSERT_HEAD(ipdep, ip, ientry);
 	return (0);
 }
 
@@ -195,9 +205,9 @@ xop_unset_ipdep(hammer2_inode_t *ip)
 	rw_assert_wrlock(&ip->pmp->xop_lock);
 
 	ipdep = &ip->pmp->ipdep_lists[xop_ipdep_value(ip)];
-	LIST_FOREACH(iptmp, ipdep, entry)
+	LIST_FOREACH(iptmp, ipdep, ientry)
 		if (iptmp == ip) {
-			LIST_REMOVE(ip, entry);
+			LIST_REMOVE(ip, ientry);
 			return;
 		}
 }

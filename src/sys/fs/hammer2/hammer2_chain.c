@@ -57,7 +57,7 @@ static int hammer2_chain_testcheck(const hammer2_chain_t *, void *);
 /*
  * Basic RBTree for chains.
  */
-static int
+int
 hammer2_chain_cmp(const hammer2_chain_t *chain1, const hammer2_chain_t *chain2)
 {
 	hammer2_key_t c1_beg, c1_end, c2_beg, c2_end;
@@ -78,10 +78,9 @@ hammer2_chain_cmp(const hammer2_chain_t *chain1, const hammer2_chain_t *chain2)
 	return (0);		/* overlap (must not cross edge boundary) */
 }
 
-RB_GENERATE_STATIC(hammer2_chain_tree, hammer2_chain, rbnode,
+RB_GENERATE(hammer2_chain_tree, hammer2_chain, rbnode,
     hammer2_chain_cmp);
-RB_SCAN_INFO(hammer2_chain_tree, hammer2_chain);
-RB_GENERATE_SCAN_STATIC(hammer2_chain_tree, hammer2_chain, rbnode);
+RB_GENERATE_SCAN(hammer2_chain_tree, hammer2_chain, rbnode);
 
 /*
  * Assert that a chain has no media data associated with it.
@@ -95,6 +94,38 @@ hammer2_chain_assert_no_data(const hammer2_chain_t *chain)
 	    chain->bref.type != HAMMER2_BREF_TYPE_FREEMAP &&
 	    chain->data)
 		hpanic("chain %p still has data", chain);
+}
+
+/*
+ * Make a chain visible to the flusher.  The flusher operates using a top-down
+ * recursion based on the ONFLUSH flag.  It locates MODIFIED and UPDATE chains,
+ * flushes them, and updates blocks back to the volume root.
+ *
+ * This routine sets the ONFLUSH flag upward from the triggering chain until
+ * it hits an inode root or the volume root.  Inode chains serve as inflection
+ * points, requiring the flusher to bridge across trees.  Inodes include
+ * regular inodes, PFS roots (pmp->iroot), and the media super root
+ * (spmp->iroot).
+ */
+void
+hammer2_chain_setflush(hammer2_chain_t *chain)
+{
+	hammer2_chain_t *parent;
+
+	if ((chain->flags & HAMMER2_CHAIN_ONFLUSH) == 0) {
+		hammer2_spin_sh(&chain->core.spin);
+		while ((chain->flags & HAMMER2_CHAIN_ONFLUSH) == 0) {
+			atomic_set_int(&chain->flags, HAMMER2_CHAIN_ONFLUSH);
+			if (chain->bref.type == HAMMER2_BREF_TYPE_INODE)
+				break;
+			if ((parent = chain->parent) == NULL)
+				break;
+			hammer2_spin_sh(&parent->core.spin);
+			hammer2_spin_unsh(&chain->core.spin);
+			chain = parent;
+		}
+		hammer2_spin_unsh(&chain->core.spin);
+	}
 }
 
 /*
@@ -154,6 +185,9 @@ hammer2_chain_alloc(hammer2_dev_t *hmp, hammer2_pfs_t *pmp,
 	chain->refs = 1;
 	chain->flags = HAMMER2_CHAIN_ALLOCATED;
 
+	/* Set the PFS boundary flag if this chain represents a PFS root. */
+	if (bref->flags & HAMMER2_BREF_FLAG_PFSROOT)
+		atomic_set_int(&chain->flags, HAMMER2_CHAIN_PFSBOUNDARY);
 	hammer2_chain_init(chain);
 
 	return (chain);
@@ -267,7 +301,7 @@ hammer2_chain_drop(hammer2_chain_t *chain)
 				break;
 			/* Retry the same chain. */
 		}
-		cpu_spinwait();
+		cpu_pause();
 	}
 }
 
@@ -307,7 +341,7 @@ hammer2_chain_unhold(hammer2_chain_t *chain)
 				}
 				tsleep(chain, PINOD, "h2race1", 1);
 			}
-			cpu_spinwait();
+			cpu_pause();
 		}
 	}
 }
@@ -642,7 +676,7 @@ again:
 				break;
 			/* Retry the same chain. */
 		}
-		cpu_spinwait();
+		cpu_pause();
 	}
 	goto again;
 }
@@ -840,7 +874,27 @@ again:
 
 	bdata = hammer2_io_data(chain->dio, chain->bref.data_off);
 
-	if ((chain->flags & HAMMER2_CHAIN_TESTEDGOOD) == 0) {
+	if (chain->flags & HAMMER2_CHAIN_INITIAL) {
+		/*
+		 * Clear INITIAL.  In this case we used io_new() and the
+		 * buffer has been zero'd and marked dirty.
+		 *
+		 * CHAIN_MODIFIED has not been set yet, and we leave it
+		 * that way for now.  Set a temporary CHAIN_NOTTESTED flag
+		 * to prevent hammer2_chain_testcheck() from trying to match
+		 * a check code that has not yet been generated.  This bit
+		 * should NOT end up on the actual media.
+		 */
+		atomic_clear_int(&chain->flags, HAMMER2_CHAIN_INITIAL);
+		atomic_set_int(&chain->flags, HAMMER2_CHAIN_NOTTESTED);
+	} else if (chain->flags & HAMMER2_CHAIN_MODIFIED) {
+		/*
+		 * Check data not currently synchronized due to
+		 * modification.  XXX assumes data stays in the buffer
+		 * cache, which might not be true (need biodep on flush
+		 * to calculate crc?  or simple crc?).
+		 */
+	} if ((chain->flags & HAMMER2_CHAIN_TESTEDGOOD) == 0) {
 		if (hammer2_chain_testcheck(chain, bdata) == 0)
 			chain->error = HAMMER2_ERROR_CHECK;
 		else
@@ -927,7 +981,7 @@ hammer2_chain_unlock(hammer2_chain_t *chain)
 				}
 				tsleep(chain, PINOD, "h2race2", 1);
 			}
-			cpu_spinwait();
+			cpu_pause();
 		}
 	}
 
@@ -1362,6 +1416,11 @@ again:
 		 */
 		if (parent->data->ipdata.meta.op_flags &
 		    HAMMER2_OPFLAG_DIRECTDATA) {
+			if (flags & HAMMER2_LOOKUP_NODIRECT) {
+				chain = NULL;
+				*key_nextp = key_end + 1;
+				goto done;
+			}
 			hammer2_chain_ref(parent);
 			hammer2_chain_lock(parent,
 			    how_always | HAMMER2_RESOLVE_LOCKAGAIN);
@@ -1774,7 +1833,7 @@ again:
 	}
 
 	/*
-	 * Skip deleted chains (XXX cache 'i' end-of-block-array? XXX)
+	 * Skip deleted chains (XXX cache 'i' end-of-block-array?)
 	 *
 	 * NOTE: chain's key range is not relevant as there might be
 	 *	 one-offs within the range that are not deleted.
@@ -1811,6 +1870,20 @@ hammer2_chain_create(hammer2_chain_t **parentp, hammer2_chain_t **chainp,
     hammer2_dev_t *hmp, hammer2_pfs_t *pmp, int methods, hammer2_key_t key,
     int keybits, int type, size_t bytes, hammer2_tid_t mtid,
     hammer2_off_t dedup_off, int flags)
+{
+	return (HAMMER2_ERROR_EOPNOTSUPP);
+}
+
+int
+hammer2_chain_indirect_maintenance(hammer2_chain_t *parent,
+    hammer2_chain_t *chain)
+{
+	return (HAMMER2_ERROR_EOPNOTSUPP);
+}
+
+int
+hammer2_chain_delete(hammer2_chain_t *parent, hammer2_chain_t *chain,
+    hammer2_tid_t mtid, int flags)
 {
 	return (HAMMER2_ERROR_EOPNOTSUPP);
 }
@@ -1983,6 +2056,67 @@ found:
 	return (chain);
 }
 
+void
+hammer2_base_delete(hammer2_chain_t *parent, hammer2_blockref_t *base,
+    int count, hammer2_chain_t *chain, hammer2_blockref_t *obref)
+{
+}
+
+void
+hammer2_base_insert(hammer2_chain_t *parent, hammer2_blockref_t *base,
+    int count, hammer2_chain_t *chain, hammer2_blockref_t *elm)
+{
+}
+
+/*
+ * Set the check data for a chain.  This can be a heavy-weight operation
+ * and typically only runs on-flush.  For file data check data is calculated
+ * when the logical buffers are flushed.
+ */
+void
+hammer2_chain_setcheck(hammer2_chain_t *chain, void *bdata)
+{
+	atomic_clear_int(&chain->flags, HAMMER2_CHAIN_NOTTESTED);
+
+	switch (HAMMER2_DEC_CHECK(chain->bref.methods)) {
+	case HAMMER2_CHECK_NONE:
+		break;
+	case HAMMER2_CHECK_DISABLED:
+		break;
+	case HAMMER2_CHECK_ISCSI32:
+		chain->bref.check.iscsi32.value =
+		    hammer2_icrc32(bdata, chain->bytes);
+		break;
+	case HAMMER2_CHECK_XXHASH64:
+		chain->bref.check.xxhash64.value =
+		    XXH64(bdata, chain->bytes, XXH_HAMMER2_SEED);
+		break;
+	case HAMMER2_CHECK_SHA192:
+		{
+		SHA2_CTX hash_ctx;
+		union {
+			uint8_t digest[SHA256_DIGEST_LENGTH];
+			uint64_t digest64[SHA256_DIGEST_LENGTH/8];
+		} u;
+
+		SHA256Init(&hash_ctx);
+		SHA256Update(&hash_ctx, bdata, chain->bytes);
+		SHA256Final(u.digest, &hash_ctx);
+		u.digest64[2] ^= u.digest64[3];
+		bcopy(u.digest, chain->bref.check.sha192.data,
+		    sizeof(chain->bref.check.sha192.data));
+		}
+		break;
+	case HAMMER2_CHECK_FREEMAP:
+		chain->bref.check.freemap.icrc32 =
+		    hammer2_icrc32(bdata, chain->bytes);
+		break;
+	default:
+		hpanic("unknown check type %02x", chain->bref.methods);
+		break;
+	}
+}
+
 /*
  * Returns non-zero on success, 0 on failure.
  */
@@ -1991,6 +2125,9 @@ hammer2_chain_testcheck(const hammer2_chain_t *chain, void *bdata)
 {
 	static int count = 0;
 	int r = 0;
+
+	if (chain->flags & HAMMER2_CHAIN_NOTTESTED)
+		return 1;
 
 	switch (HAMMER2_DEC_CHECK(chain->bref.methods)) {
 	case HAMMER2_CHECK_NONE:

@@ -130,6 +130,15 @@ main(int ac, char **av)
 		else
 			ecode = cmd_dumpchain(av[1],
 					      (u_int)strtoul(av[2], NULL, 0));
+	} else if (strcmp(av[0], "emergency-mode-enable") == 0) {
+		ecode = cmd_emergency_mode(sel_path, 1, ac - 1,
+					 (const char **)(void *)&av[1]);
+	} else if (strcmp(av[0], "emergency-mode-disable") == 0) {
+		ecode = cmd_emergency_mode(sel_path, 0, ac - 1,
+					 (const char **)(void *)&av[1]);
+	} else if (strcmp(av[0], "growfs") == 0) {
+		ecode = cmd_growfs(sel_path, ac - 1,
+					 (const char **)(void *)&av[1]);
 	} else if (strcmp(av[0], "pfs-clid") == 0) {
 		/*
 		 * Print cluster id (uuid) for specific PFS
@@ -234,6 +243,12 @@ usage(int code)
 		"    -s path            Select filesystem\n"
 		"    -m mem[k,m,g]      buffer memory (bulkfree)\n"
 		"\n"
+		"    emergency-mode-enable <target>    "
+			"Enable emergency operations mode on filesystem\n"
+		"                                      "
+			"THIS IS A VERY DANGEROUS MODE\n"
+		"    emergency-mode-disable <target>   "
+			"Disable emergency operations mode on filesystem\n"
 		"    pfs-list [<path>...]              "
 			"List PFSs\n"
 		"    pfs-clid <label>                  "
@@ -242,6 +257,8 @@ usage(int code)
 			"Print private id for specific PFS\n"
 		"    stat [<path>...]                  "
 			"Return inode quota & config\n"
+		"    growfs [<path...]                 "
+			"Grow a filesystem into resized partition\n"
 		"    show <devpath>                    "
 			"Raw hammer2 media dump for topology\n"
 		"    freemap <devpath>                 "
@@ -254,6 +271,8 @@ usage(int code)
 			"Run bulkfree pass\n"
 		"    printinode <path>                 "
 			"Dump inode\n"
+		"    dumpchain [<path> [<chnflags>]]   "
+			"Dump in-memory chain topology (ONFLUSH flag is 0x200)\n"
 	);
 	exit(code);
 }

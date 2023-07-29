@@ -367,6 +367,11 @@ hammer2_io_bread(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
 }
 
 void
+hammer2_io_setdirty(hammer2_io_t *dio)
+{
+}
+
+void
 hammer2_io_bqrelse(hammer2_io_t **diop)
 {
 	hammer2_io_putblk(diop);

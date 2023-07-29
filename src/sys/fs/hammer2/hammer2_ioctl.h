@@ -107,6 +107,20 @@ struct hammer2_ioc_bulkfree {
 typedef struct hammer2_ioc_bulkfree hammer2_ioc_bulkfree_t;
 
 /*
+ * Grow the filesystem.  If size is set to 0 H2 will auto-size to the
+ * partition it is in.  The caller can resize the partition, then issue
+ * the ioctl.
+ */
+struct hammer2_ioc_growfs {
+	hammer2_off_t		size;
+	int			modified;
+	int			unused01;
+	int			unusedary[14];
+};
+
+typedef struct hammer2_ioc_growfs hammer2_ioc_growfs_t;
+
+/*
  * Ioctl to manage volumes.
  */
 struct hammer2_ioc_volume {
@@ -136,6 +150,8 @@ typedef struct hammer2_ioc_volume_list hammer2_ioc_volume_list_t;
 #define HAMMER2IOC_INODE_GET		_IOWR('h', 86, struct hammer2_ioc_inode)
 #define HAMMER2IOC_DEBUG_DUMP		_IOWR('h', 91, int)
 #define HAMMER2IOC_BULKFREE_SCAN	_IOWR('h', 92, struct hammer2_ioc_bulkfree)
+#define HAMMER2IOC_EMERG_MODE		_IOWR('h', 95, int)
+#define HAMMER2IOC_GROWFS		_IOWR('h', 96, struct hammer2_ioc_growfs)
 #define HAMMER2IOC_VOLUME_LIST		_IOWR('h', 97, struct hammer2_ioc_volume_list)
 
 #endif /* !_FS_HAMMER2_IOCTL_H_ */

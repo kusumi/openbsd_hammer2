@@ -170,7 +170,7 @@ hammer2_strategy_read(struct vop_strategy_args *ap)
 	lbase = (hammer2_key_t)bp->b_lblkno * hammer2_get_logical();
 	KKASSERT(((int)lbase & HAMMER2_PBUFMASK) == 0);
 
-	xop = hammer2_xop_alloc(ip);
+	xop = hammer2_xop_alloc(ip, HAMMER2_XOP_STRATEGY);
 	xop->bp = bp;
 	xop->lbase = lbase;
 	hammer2_xop_start(&xop->head, &hammer2_strategy_read_desc);
@@ -218,12 +218,12 @@ hammer2_xop_strategy_read(hammer2_xop_t *arg, int clindex)
 	}
 
 	bp = xop->bp;
-	error = hammer2_xop_collect(&xop->head, 0);
+	error = hammer2_xop_collect(&xop->head, HAMMER2_XOP_COLLECT_NOWAIT);
 	switch (error) {
 	case 0:
 		data = hammer2_xop_gdata(&xop->head)->buf;
-		hammer2_strategy_read_completion(xop->head.cluster.focus,
-		    data, xop->bp);
+		hammer2_strategy_read_completion(xop->head.cluster.focus, data,
+		    xop->bp);
 		hammer2_xop_pdata(&xop->head);
 		s = splbio();
 		biodone(bp);
@@ -288,6 +288,14 @@ hammer2_strategy_read_completion(hammer2_chain_t *focus, const char *data,
 	} else {
 		hpanic("unknown blockref type %d", focus->bref.type);
 	}
+}
+
+/*
+ * Wait for pending I/O to complete.
+ */
+void
+hammer2_bioq_sync(hammer2_pfs_t *pmp)
+{
 }
 
 /*

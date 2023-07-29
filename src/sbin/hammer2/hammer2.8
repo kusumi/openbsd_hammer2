@@ -30,7 +30,7 @@
 .\" OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd September 18, 2022
+.Dd July 18, 2023
 .Dt HAMMER2 8
 .Os
 .Sh NAME
@@ -47,7 +47,7 @@
 The
 .Nm
 utility provides miscellaneous support functions for a
-read-only HAMMER2 file system.
+HAMMER2 file system.
 .Pp
 The options are as follows:
 .Bl -tag -width indent
@@ -70,6 +70,18 @@ locally on the host in order to be able to issue commands for other PFSs
 on the filesystem.
 The mount also enables PFS configuration scanning for that filesystem.
 .Bl -tag -width indent
+.\" ==== emergency-mode-enable ===
+.It Cm emergency-mode-enable Ar target
+Flag emergency operations mode in the filesystem.
+.\" ==== emergency-mode-disable ===
+.It Cm emergency-mode-disable Ar target
+Turn off the emergency operations mode on a filesystem, restoring normal
+operation.
+.\" ==== growfs ====
+.It Cm growfs Op fspath...
+After resizing the disk partition you can issue this command on a
+mounted hammer2 filesystem to grow into the new space in the partition.
+This command is run on a live hammer2 filesystem.
 .\" ==== pfs-list ====
 .It Cm pfs-list Op path...
 List all PFSs associated with all mounted hammer2 storage devices.

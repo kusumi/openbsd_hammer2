@@ -37,9 +37,14 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/fcntl.h>
+#include <sys/buf.h>
+#include <sys/dkio.h>
+#include <sys/disklabel.h>
 
 #include "hammer2.h"
 #include "hammer2_ioctl.h"
+#include "hammer2_mount.h"
 
 /*
  * Retrieve ondisk version.
@@ -275,6 +280,37 @@ hammer2_ioctl_debug_dump(hammer2_inode_t *ip, unsigned int flags)
 }
 
 /*
+ * Turn on or off emergency mode on a filesystem.
+ */
+static int
+hammer2_ioctl_emerg_mode(hammer2_inode_t *ip, u_int mode)
+{
+	hammer2_pfs_t *pmp = ip->pmp;
+	hammer2_dev_t *hmp;
+	int i;
+
+	if (mode) {
+		hprintf("WARNING: Emergency mode enabled\n");
+		atomic_set_int(&pmp->flags, HAMMER2_PMPF_EMERG);
+	} else {
+		hprintf("WARNING: Emergency mode disabled\n");
+		atomic_clear_int(&pmp->flags, HAMMER2_PMPF_EMERG);
+	}
+
+	for (i = 0; i < HAMMER2_MAXCLUSTER; ++i) {
+		hmp = pmp->pfs_hmps[i];
+		if (hmp == NULL)
+			continue;
+		if (mode)
+			atomic_set_int(&hmp->hflags, HMNT2_EMERG);
+		else
+			atomic_clear_int(&hmp->hflags, HMNT2_EMERG);
+	}
+
+	return (0);
+}
+
+/*
  * Do a bulkfree scan on media related to the PFS.  This routine will
  * flush all PFSs associated with the media before doing the bulkfree
  * scan.
@@ -282,8 +318,7 @@ hammer2_ioctl_debug_dump(hammer2_inode_t *ip, unsigned int flags)
  * This version can only run on non-clustered media.  A new ioctl or a
  * temporary mount of @LOCAL will be needed to run on clustered media.
  */
-static
-int
+static int
 hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
 {
 	hammer2_ioc_bulkfree_t *bfi = data;
@@ -366,6 +401,139 @@ failed:
 }
 
 /*
+ * Grow a filesystem into its partition size.
+ */
+static int
+hammer2_ioctl_growfs(hammer2_inode_t *ip, void *data)
+{
+	hammer2_ioc_growfs_t *grow = data;
+	hammer2_dev_t *hmp;
+	hammer2_off_t size, delta;
+	hammer2_tid_t mtid;
+	struct disklabel dl;
+	struct buf *bp;
+	int i, error;
+	daddr_t blkno;
+
+	hmp = ip->pmp->pfs_hmps[0];
+	if (hmp == NULL)
+		return (EINVAL);
+
+	if (hmp->nvolumes > 1) {
+		hprintf("growfs currently unsupported with multiple volumes\n");
+		return (EOPNOTSUPP);
+	}
+	KKASSERT(hmp->total_size == hmp->voldata.volu_size);
+
+	/* Get media size. */
+	error = VOP_IOCTL(hmp->devvp, DIOCGDINFO, &dl, FREAD, FSCRED, curproc);
+	if (error) {
+		hprintf("failed to get media size\n");
+		return (error);
+	}
+	size = (hammer2_off_t)dl.d_secperunit * dl.d_secsize;
+	hprintf("growfs partition-auto to %016jx\n", (intmax_t)size);
+
+	/* Expand to devvp size unless specified. */
+	grow->modified = 0;
+	if (grow->size == 0) {
+		grow->size = size;
+	} else if (grow->size > size) {
+		hprintf("growfs size %016jx exceeds device size %016jx\n",
+		    (intmax_t)grow->size, (intmax_t)size);
+		return (EINVAL);
+	}
+
+	/*
+	 * This is typically ~8MB alignment to avoid edge cases accessing
+	 * reserved blocks at the base of each 2GB zone.
+	 */
+	grow->size &= ~HAMMER2_VOLUME_ALIGNMASK64;
+	delta = grow->size - hmp->voldata.volu_size;
+
+	/* Maximum allowed size is 2^63. */
+	if (grow->size > 0x7FFFFFFFFFFFFFFFLU) {
+		hprintf("growfs failure, limit is 2^63 - 1 bytes\n");
+		return (EINVAL);
+	}
+
+	/* We can't shrink a filesystem. */
+	if (grow->size < hmp->voldata.volu_size) {
+		hprintf("growfs failure, would shrink from %016jx to %016jx\n",
+		    (intmax_t)hmp->voldata.volu_size, (intmax_t)grow->size);
+		return (EINVAL);
+	}
+
+	if (delta == 0) {
+		hprintf("growfs - size did not change\n");
+		return (0);
+	}
+
+	/*
+	 * Clear any new volume header backups that we extend into.
+	 * Skip volume headers that are already part of the filesystem.
+	 */
+	for (i = 0; i < HAMMER2_NUM_VOLHDRS; ++i) {
+		if (i * HAMMER2_ZONE_BYTES64 < hmp->voldata.volu_size)
+			continue;
+		if (i * HAMMER2_ZONE_BYTES64 >= grow->size)
+			break;
+		hprintf("growfs - clear volhdr %d\n", i);
+		blkno = i * HAMMER2_ZONE_BYTES64 / DEV_BSIZE;
+		error = bread(hmp->devvp, blkno, HAMMER2_VOLUME_BYTES, &bp);
+		if (error) {
+			brelse(bp);
+			hprintf("I/O error %d\n", error);
+			return (EINVAL);
+		}
+		bzero(bp->b_data, HAMMER2_VOLUME_BYTES);
+		error = bwrite(bp);
+		if (error) {
+			hprintf("I/O error %d\n", error);
+			return (EINVAL);
+		}
+	}
+
+	hammer2_trans_init(hmp->spmp, HAMMER2_TRANS_ISFLUSH);
+	mtid = hammer2_trans_sub(hmp->spmp);
+
+	hprintf("growfs - expand by %016jx to %016jx mtid %016jx\n",
+	    (intmax_t)delta, (intmax_t)grow->size, (intmax_t)mtid);
+
+	hammer2_voldata_lock(hmp);
+	hammer2_voldata_modify(hmp);
+
+	/*
+	 * NOTE: Just adjusting total_size for a single-volume filesystem
+	 *	 or for the last volume in a multi-volume filesystem, is
+	 *	 fine.  But we can't grow any other partition in a multi-volume
+	 *	 filesystem.  For now we just punt (at the top) on any
+	 *	 multi-volume filesystem.
+	 */
+	hmp->voldata.volu_size = grow->size;
+	hmp->voldata.total_size += delta;
+	hmp->voldata.allocator_size += delta;
+	hmp->voldata.allocator_free += delta;
+	hmp->total_size += delta;
+	hmp->volumes[0].size += delta; /* note: indexes first (only) volume */
+
+	hammer2_voldata_unlock(hmp);
+
+	hammer2_trans_done(hmp->spmp,
+	    HAMMER2_TRANS_ISFLUSH | HAMMER2_TRANS_SIDEQ);
+	grow->modified = 1;
+
+	/*
+	 * Flush the mess right here and now.  We could just let the
+	 * filesystem syncer do it, but this was a sensitive operation
+	 * so don't take any chances.
+	 */
+	hammer2_vfs_sync(ip->pmp->mp, MNT_WAIT);
+
+	return (0);
+}
+
+/*
  * Get a list of volumes.
  */
 static int
@@ -425,8 +593,14 @@ hammer2_ioctl_impl(hammer2_inode_t *ip, unsigned long com, void *data,
 	case HAMMER2IOC_DEBUG_DUMP:
 		error = hammer2_ioctl_debug_dump(ip, *(unsigned int *)data);
 		break;
+	case HAMMER2IOC_EMERG_MODE:
+		error = hammer2_ioctl_emerg_mode(ip, *(unsigned int *)data);
+		break;
 	case HAMMER2IOC_BULKFREE_SCAN:
 		error = hammer2_ioctl_bulkfree_scan(ip, data);
+		break;
+	case HAMMER2IOC_GROWFS:
+		error = hammer2_ioctl_growfs(ip, data);
 		break;
 	case HAMMER2IOC_VOLUME_LIST:
 		error = hammer2_ioctl_volume_list(ip, data);

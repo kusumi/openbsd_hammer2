@@ -63,6 +63,7 @@ struct hammer2_mount_info {
 };
 
 #define HMNT2_LOCAL		0x00000002
+#define HMNT2_EMERG		0x00000004
 
 #define HMNT2_DEVFLAGS		(HMNT2_LOCAL)
 

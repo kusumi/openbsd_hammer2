@@ -138,7 +138,6 @@ hammer2_open_devvp(struct mount *mp, const hammer2_devvp_list_t *devvpl,
 			e->xflags = FREAD;
 		else
 			e->xflags = FREAD|FWRITE;
-		KKASSERT(e->xflags == FREAD);
 
 		error = VOP_OPEN(devvp, e->xflags, FSCRED, runp);
 		if (error) {
@@ -165,8 +164,6 @@ hammer2_close_devvp(const hammer2_devvp_list_t *devvpl, struct proc *runp)
 		if (e->open) {
 			devvp = e->devvp;
 			KKASSERT(devvp);
-
-			KKASSERT(e->xflags == FREAD);
 
 			if (devvp->v_type != VBAD)
 				devvp->v_specmountpoint = NULL;
@@ -555,6 +552,7 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 		/* OpenBSD bread(9) doesn't fail with blkno beyond its size. */
 		blkno = blkoff / DEV_BSIZE;
 		if (bread(devvp, blkno, HAMMER2_VOLUME_BYTES, &bp)) {
+			brelse(bp);
 			bp = NULL;
 			continue;
 		}
@@ -797,6 +795,8 @@ hammer2_get_volume(hammer2_dev_t *hmp, hammer2_off_t offset)
 
 	offset &= ~HAMMER2_OFF_MASK_RADIX;
 
+	/* locking is unneeded until volume-add support */
+	//hammer2_voldata_lock(hmp);
 	/* Do binary search if users really use this many supported volumes. */
 	for (i = 0; i < hmp->nvolumes; ++i) {
 		vol = &hmp->volumes[i];
@@ -806,6 +806,7 @@ hammer2_get_volume(hammer2_dev_t *hmp, hammer2_off_t offset)
 			break;
 		}
 	}
+	//hammer2_voldata_unlock(hmp);
 
 	if (!ret)
 		hpanic("no volume for offset %016jx", (intmax_t)offset);

@@ -122,7 +122,7 @@ rw_tryupgrade(struct rrwlock *p)
 	return (rrw_enter(p, RW_WRITE|RW_NOSLEEP) ? 0 : 1); /* 0 on failure */
 }
 
-#define cpu_spinwait	CPU_BUSY_CYCLE
+#define cpu_pause	CPU_BUSY_CYCLE
 
 /* Taken from sys/sys/cdefs.h in FreeBSD. */
 #define __compiler_membar()	__asm __volatile(" " : : : "memory")
