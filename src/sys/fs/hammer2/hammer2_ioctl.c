@@ -46,6 +46,23 @@
 #include "hammer2_ioctl.h"
 #include "hammer2_mount.h"
 
+#if 0
+/*
+ * Return 1 if read-only mounted otherwise 0.  DragonFly allows bwrite(9)
+ * against a read-only mounted device, but FreeBSD does not.
+ */
+static int
+hammer2_is_rdonly(const struct mount *mp)
+{
+	if (mp->mnt_flag & MNT_RDONLY) {
+		hprintf("PFS read-only mounted\n");
+		return (1);
+	}
+
+	return (0);
+}
+#endif
+
 /*
  * Retrieve ondisk version.
  */
@@ -327,10 +344,9 @@ hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
 	hammer2_chain_t *vchain;
 	int error = 0, didsnap, etmp, i;
 
-	pmp = ip->pmp;
-	ip = pmp->iroot;
+	ip = ip->pmp->iroot;
 
-	hmp = pmp->pfs_hmps[0];
+	hmp = ip->pmp->pfs_hmps[0];
 	if (hmp == NULL)
 		return (EINVAL);
 	if (bfi == NULL)

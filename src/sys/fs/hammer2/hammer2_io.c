@@ -44,6 +44,8 @@
 #include "hammer2.h"
 
 #define HAMMER2_DOP_READ	1
+#define HAMMER2_DOP_NEW		2
+#define HAMMER2_DOP_NEWNZ	3
 
 /*
  * Implements an abstraction layer for buffered device I/O.
@@ -83,7 +85,8 @@ hammer2_assert_io_refs(hammer2_io_t *dio)
  * Returns the locked DIO corresponding to the data|radix offset.
  */
 static hammer2_io_t *
-hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off)
+hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off, uint8_t btype,
+    int createit)
 {
 	hammer2_volume_t *vol;
 	hammer2_io_t *dio, *xio, find;
@@ -115,7 +118,7 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off)
 		refs = atomic_fetchadd_32(&dio->refs, 1);
 		if ((refs & HAMMER2_DIO_MASK) == 0)
 			atomic_add_int(&dio->hmp->iofree_count, -1);
-	} else {
+	} else if (createit) {
 		vol = hammer2_get_volume(hmp, pbase);
 		dio = malloc(sizeof(*dio), M_HAMMER2, M_WAITOK | M_ZERO);
 		dio->hmp = hmp;
@@ -124,6 +127,7 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off)
 		KKASSERT((dio->dbase & HAMMER2_FREEMAP_LEVEL1_MASK) == 0);
 		dio->pbase = pbase;
 		dio->psize = psize;
+		dio->btype = btype;
 		dio->refs = 1;
 		dio->act = 5;
 		hammer2_mtx_init(&dio->lock, "h2io_inplk");
@@ -141,6 +145,8 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off)
 			dio = xio;
 			hammer2_mtx_ex(&dio->lock);
 		}
+	} else {
+		return (NULL);
 	}
 
 	dio->ticks = getticks();
@@ -167,7 +173,8 @@ hammer2_io_getblk(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize, int op)
 	KKASSERT((1 << (int)(lbase & HAMMER2_OFF_MASK_RADIX)) == lsize);
 
 	hammer2_mtx_ex(&hmp->iotree_lock);
-	dio = hammer2_io_alloc(hmp, lbase);
+	dio = hammer2_io_alloc(hmp, lbase, btype, 1);
+	KKASSERT(dio);
 	hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
 	hammer2_mtx_unlock(&hmp->iotree_lock);
 
@@ -179,6 +186,7 @@ hammer2_io_getblk(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize, int op)
 	KKASSERT(dio->bp == NULL);
 	lblkno = (dio->pbase - dio->dbase) / DEV_BSIZE;
 	error = bread(dio->devvp, lblkno, dio->psize, &dio->bp);
+	hammer2_inc_iostat(&hmp->iostat_read, dio->btype, dio->psize);
 
 	/* XXX
 	if (dio->bp)
@@ -207,6 +215,7 @@ hammer2_io_putblk(hammer2_io_t **diop)
 	hammer2_io_t *dio;
 	struct buf *bp;
 	struct hammer2_cleanupcb_info info;
+	uint64_t orefs;
 	int dio_limit;
 
 	dio = *diop;
@@ -224,9 +233,10 @@ hammer2_io_putblk(hammer2_io_t **diop)
 	 * On the 1->0 transition clear DIO_GOOD.
 	 * On any other transition we can return early.
 	 */
+	orefs = dio->refs;
 	if ((dio->refs & HAMMER2_DIO_MASK) == 1) {
 		dio->refs--;
-		dio->refs &= ~HAMMER2_DIO_GOOD;
+		dio->refs &= ~(HAMMER2_DIO_GOOD | HAMMER2_DIO_DIRTY);
 	} else {
 		dio->refs--;
 		hammer2_mtx_unlock(&dio->lock);
@@ -234,18 +244,26 @@ hammer2_io_putblk(hammer2_io_t **diop)
 	}
 
 	/* Lastdrop (1->0 transition) case. */
+	hmp = dio->hmp;
 	bp = dio->bp;
 	dio->bp = NULL;
 
-	/*
-	 * HAMMER2 with write support may write out buffer here,
-	 * instead of just disposing of the buffer.
-	 */
-	if (bp)
-		brelse(bp);
+	/* Write out and dispose of buffer. */
+	if (bp) {
+		if (orefs & HAMMER2_DIO_GOOD) {
+			if (orefs & HAMMER2_DIO_DIRTY) {
+				bdwrite(bp);
+				hammer2_inc_iostat(&hmp->iostat_write,
+				    dio->btype, dio->psize);
+			} else {
+				brelse(bp);
+			}
+		} else {
+			brelse(bp);
+		}
+	}
 
 	/* Update iofree_count before disposing of the dio. */
-	hmp = dio->hmp;
 	atomic_add_int(&hmp->iofree_count, 1);
 
 	KKASSERT(!(dio->refs & HAMMER2_DIO_GOOD));
@@ -318,6 +336,9 @@ hammer2_io_cleanup(hammer2_dev_t *hmp, hammer2_io_tree_t *tree)
 		RB_REMOVE(hammer2_io_tree, tree, dio);
 		KKASSERT(dio->bp == NULL &&
 		    (dio->refs & HAMMER2_DIO_MASK) == 0);
+		if (dio->refs & HAMMER2_DIO_DIRTY)
+			hprintf("dirty buffer %016jx/%d\n",
+			    dio->pbase, dio->psize);
 
 		hammer2_mtx_destroy(&dio->lock);
 		free(dio, M_HAMMER2, 0);
@@ -348,14 +369,16 @@ int
 hammer2_io_new(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
     hammer2_io_t **diop)
 {
-	return (EOPNOTSUPP);
+	*diop = hammer2_io_getblk(hmp, btype, lbase, lsize, HAMMER2_DOP_NEW);
+	return ((*diop)->error);
 }
 
 int
 hammer2_io_newnz(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
     hammer2_io_t **diop)
 {
-	return (EOPNOTSUPP);
+	*diop = hammer2_io_getblk(hmp, btype, lbase, lsize, HAMMER2_DOP_NEWNZ);
+	return ((*diop)->error);
 }
 
 int
@@ -369,6 +392,13 @@ hammer2_io_bread(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
 void
 hammer2_io_setdirty(hammer2_io_t *dio)
 {
+	atomic_set_int(&dio->refs, HAMMER2_DIO_DIRTY);
+}
+
+void
+hammer2_io_brelse(hammer2_io_t **diop)
+{
+	hammer2_io_putblk(diop);
 }
 
 void
@@ -377,19 +407,127 @@ hammer2_io_bqrelse(hammer2_io_t **diop)
 	hammer2_io_putblk(diop);
 }
 
+#define HAMMER2_DEDUP_FRAG	(HAMMER2_PBUFSIZE / 64)
+#define HAMMER2_DEDUP_FRAGRADIX	(HAMMER2_PBUFRADIX - 6)
+
+uint64_t
+hammer2_dedup_mask(hammer2_io_t *dio, hammer2_off_t data_off, u_int bytes)
+{
+	int bbeg, bits;
+	uint64_t mask;
+
+	bbeg = (int)((data_off & ~HAMMER2_OFF_MASK_RADIX) - dio->pbase) >>
+	    HAMMER2_DEDUP_FRAGRADIX;
+	bits = (int)((bytes + (HAMMER2_DEDUP_FRAG - 1)) >>
+	    HAMMER2_DEDUP_FRAGRADIX);
+
+	if (bbeg + bits == 64)
+		mask = (uint64_t)-1;
+	else
+		mask = ((uint64_t)1 << (bbeg + bits)) - 1;
+	mask &= ~(((uint64_t)1 << bbeg) - 1);
+
+	return (mask);
+}
+
+/*
+ * Set dedup validation bits in a DIO.  We do not need the buffer cache
+ * buffer for this.  This must be done concurrent with setting bits in
+ * the freemap so as to interlock with bulkfree's clearing of those bits.
+ */
 void
 hammer2_io_dedup_set(hammer2_dev_t *hmp, hammer2_blockref_t *bref)
 {
+	hammer2_io_t *dio;
+	uint64_t mask;
+	int lsize;
+
+	hammer2_mtx_ex(&hmp->iotree_lock);
+	dio = hammer2_io_alloc(hmp, bref->data_off, bref->type, 1);
+	KKASSERT(dio);
+	hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
+	hammer2_mtx_unlock(&hmp->iotree_lock);
+
+	if ((int)(bref->data_off & HAMMER2_OFF_MASK_RADIX))
+		lsize = 1 << (int)(bref->data_off & HAMMER2_OFF_MASK_RADIX);
+	else
+		lsize = 0;
+
+	mask = hammer2_dedup_mask(dio, bref->data_off, lsize);
+	atomic_clear_64(&dio->dedup_valid, mask);
+	atomic_set_64(&dio->dedup_alloc, mask);
+
+	hammer2_mtx_unlock(&dio->lock);
+	hammer2_io_putblk(&dio);
 }
 
+/*
+ * Clear dedup validation bits in a DIO.  This is typically done when
+ * a modified chain is destroyed or by the bulkfree code.  No buffer
+ * is needed for this operation.  If the DIO no longer exists it is
+ * equivalent to the bits not being set.
+ */
 void
 hammer2_io_dedup_delete(hammer2_dev_t *hmp, uint8_t btype,
     hammer2_off_t data_off, unsigned int bytes)
 {
+	hammer2_io_t *dio;
+	uint64_t mask;
+
+	if ((data_off & ~HAMMER2_OFF_MASK_RADIX) == 0)
+		return;
+	if (btype != HAMMER2_BREF_TYPE_DATA)
+		return;
+
+	hammer2_mtx_ex(&hmp->iotree_lock);
+	dio = hammer2_io_alloc(hmp, data_off, btype, 0);
+	if (dio) {
+		hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
+		hammer2_mtx_unlock(&hmp->iotree_lock);
+
+		if (data_off < (hammer2_off_t)dio->pbase ||
+		    (data_off & ~HAMMER2_OFF_MASK_RADIX) +
+		    (hammer2_off_t)bytes >
+		    (hammer2_off_t)dio->pbase + dio->psize)
+			hpanic("bad data_off %016jx/%d %016jx",
+			    data_off, bytes, dio->pbase);
+
+		mask = hammer2_dedup_mask(dio, data_off, bytes);
+		atomic_clear_64(&dio->dedup_alloc, mask);
+		atomic_clear_64(&dio->dedup_valid, mask);
+
+		hammer2_mtx_unlock(&dio->lock);
+		hammer2_io_putblk(&dio);
+	} else {
+		hammer2_mtx_unlock(&hmp->iotree_lock);
+	}
 }
 
+/*
+ * Assert that dedup allocation bits in a DIO are not set.  This operation
+ * does not require a buffer.  The DIO does not need to exist.
+ */
 void
 hammer2_io_dedup_assert(hammer2_dev_t *hmp, hammer2_off_t data_off,
     unsigned int bytes)
 {
+	hammer2_io_t *dio;
+
+	hammer2_mtx_ex(&hmp->iotree_lock);
+	dio = hammer2_io_alloc(hmp, data_off, HAMMER2_BREF_TYPE_DATA, 0);
+	if (dio) {
+		hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
+		hammer2_mtx_unlock(&hmp->iotree_lock);
+
+		KASSERTMSG((dio->dedup_alloc &
+		    hammer2_dedup_mask(dio, data_off, bytes)) == 0,
+		    "%016jx/%d %016jx/%016jx", data_off, bytes,
+		    hammer2_dedup_mask(dio, data_off, bytes),
+		    dio->dedup_alloc);
+
+		hammer2_mtx_unlock(&dio->lock);
+		hammer2_io_putblk(&dio);
+	} else {
+		hammer2_mtx_unlock(&hmp->iotree_lock);
+	}
 }

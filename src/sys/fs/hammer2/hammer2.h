@@ -218,11 +218,15 @@ struct hammer2_io {
 	off_t			pbase;
 	int			psize;
 	int			act;		/* activity */
+	int			btype;
 	int			ticks;
 	int			error;
+	uint64_t		dedup_valid;	/* valid for dedup operation */
+	uint64_t		dedup_alloc;	/* allocated / de-dupable */
 };
 
 #define HAMMER2_DIO_GOOD	0x40000000U	/* dio->bp is stable */
+#define HAMMER2_DIO_DIRTY	0x10000000U	/* flush last drop */
 #define HAMMER2_DIO_MASK	0x00FFFFFFU
 
 /*
@@ -250,6 +254,7 @@ struct hammer2_chain {
 	RB_ENTRY(hammer2_chain) rbnode;		/* live chain(s) */
 	TAILQ_ENTRY(hammer2_chain) entry;	/* 0-refs LRU */
 	hammer2_mtx_t		lock;
+	hammer2_mtx_t		diolk;		/* xop focus interlock */
 	struct rwlock		inp_lock;
 	char			*inp_cv;
 	hammer2_chain_core_t	core;
@@ -282,6 +287,7 @@ struct hammer2_chain {
 #define HAMMER2_CHAIN_MODIFIED		0x00000001	/* dirty chain data */
 #define HAMMER2_CHAIN_ALLOCATED		0x00000002	/* kmalloc'd chain */
 #define HAMMER2_CHAIN_DESTROY		0x00000004
+#define HAMMER2_CHAIN_DEDUPABLE		0x00000008	/* registered w/dedup */
 #define HAMMER2_CHAIN_DELETED		0x00000010	/* deleted chain */
 #define HAMMER2_CHAIN_INITIAL		0x00000020	/* initial create */
 #define HAMMER2_CHAIN_UPDATE		0x00000040	/* need parent update */
@@ -298,6 +304,7 @@ struct hammer2_chain {
 #define HAMMER2_CHAIN_IOINPROG		0x00100000	/* I/O interlock */
 #define HAMMER2_CHAIN_IOSIGNAL		0x00200000	/* I/O interlock */
 #define HAMMER2_CHAIN_PFSBOUNDARY	0x00400000	/* super->pfs inode */
+#define HAMMER2_CHAIN_HINT_LEAF_COUNT	0x00800000	/* redo leaf count */
 #define HAMMER2_CHAIN_LRUHINT		0x01000000	/* was reused */
 
 #define HAMMER2_CHAIN_FLUSH_MASK	(HAMMER2_CHAIN_MODIFIED |	\
@@ -358,6 +365,14 @@ struct hammer2_chain {
 #define HAMMER2_LOOKUP_SHARED		0x00000100
 #define HAMMER2_LOOKUP_MATCHIND		0x00000200	/* return all chains */
 #define HAMMER2_LOOKUP_ALWAYS		0x00000800	/* resolve data */
+
+/*
+ * Flags passed to hammer2_chain_modify() and hammer2_chain_resize().
+ *
+ * NOTE: OPTDATA allows us to avoid instantiating buffers for INDIRECT
+ *	 blocks in the INITIAL-create state.
+ */
+#define HAMMER2_MODIFY_OPTDATA		0x00000002	/* data can be NULL */
 
 /*
  * Flags passed to hammer2_chain_lock().
@@ -649,6 +664,29 @@ struct hammer2_volume {
 typedef struct hammer2_volume hammer2_volume_t;
 
 /*
+ * I/O stat structure.
+ */
+struct hammer2_iostat_unit {
+	unsigned long		count;
+	unsigned long		bytes;
+};
+
+typedef struct hammer2_iostat_unit hammer2_iostat_unit_t;
+
+struct hammer2_iostat {
+	hammer2_iostat_unit_t	inode;
+	hammer2_iostat_unit_t	indirect;
+	hammer2_iostat_unit_t	data;
+	hammer2_iostat_unit_t	dirent;
+	hammer2_iostat_unit_t	freemap_node;
+	hammer2_iostat_unit_t	freemap_leaf;
+	hammer2_iostat_unit_t	freemap;
+	hammer2_iostat_unit_t	volume;
+};
+
+typedef struct hammer2_iostat hammer2_iostat_t;
+
+/*
  * Global (per partition) management structure, represents a hard block
  * device.  Typically referenced by hammer2_chain structures when applicable.
  *
@@ -680,6 +718,8 @@ struct hammer2_dev {
 	int			freemap_relaxed;
 	hammer2_off_t		heur_freemap[HAMMER2_FREEMAP_HEUR_SIZE];
 	hammer2_dedup_t		heur_dedup[HAMMER2_DEDUP_HEUR_SIZE];
+	hammer2_iostat_t	iostat_read;	/* read I/O stat */
+	hammer2_iostat_t	iostat_write;	/* write I/O stat */
 };
 
 /*
@@ -878,7 +918,9 @@ int hammer2_io_new(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
 int hammer2_io_newnz(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
 int hammer2_io_bread(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
 void hammer2_io_setdirty(hammer2_io_t *);
+void hammer2_io_brelse(hammer2_io_t **);
 void hammer2_io_bqrelse(hammer2_io_t **);
+uint64_t hammer2_dedup_mask(hammer2_io_t *, hammer2_off_t, u_int);
 void hammer2_io_dedup_set(hammer2_dev_t *, hammer2_blockref_t *);
 void hammer2_io_dedup_delete(hammer2_dev_t *, uint8_t, hammer2_off_t,
     unsigned int);
@@ -903,6 +945,7 @@ hammer2_volume_t *hammer2_get_volume(hammer2_dev_t *, hammer2_off_t);
 int hammer2_strategy(void *v);
 void hammer2_xop_strategy_read(hammer2_xop_t *, int);
 void hammer2_bioq_sync(hammer2_pfs_t *);
+void hammer2_dedup_record(hammer2_chain_t *, hammer2_io_t *, const char *);
 void hammer2_dedup_clear(hammer2_dev_t *);
 
 /* hammer2_subr.c */
@@ -915,6 +958,8 @@ int hammer2_getradix(size_t);
 int hammer2_calc_logical(hammer2_inode_t *, hammer2_off_t, hammer2_key_t *,
     hammer2_key_t *);
 int hammer2_get_logical(void);
+void hammer2_inc_iostat(hammer2_iostat_t *, int, size_t);
+void hammer2_print_iostat(const hammer2_iostat_t *, const char *);
 int hammer2_signal_check(void);
 const char *hammer2_breftype_to_str(uint8_t);
 char *kstrdup(const char *);
@@ -977,9 +1022,11 @@ hammer2_xop_gdata(hammer2_xop_head_t *xop)
 	const void *data;
 
 	if (focus->dio) {
+		hammer2_mtx_sh(&focus->diolk);
 		if ((xop->focus_dio = focus->dio) != NULL)
 			atomic_add_32(&xop->focus_dio->refs, 1);
 		data = focus->data;
+		hammer2_mtx_unlock(&focus->diolk);
 	} else {
 		data = focus->data;
 	}

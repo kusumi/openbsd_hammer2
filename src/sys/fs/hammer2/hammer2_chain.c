@@ -44,6 +44,7 @@
 #include <crypto/sha2.h>
 
 #include "hammer2.h"
+#include "hammer2_mount.h"
 #include "hammer2_xxhash.h"
 
 static hammer2_chain_t *hammer2_combined_find(hammer2_chain_t *,
@@ -144,8 +145,7 @@ hammer2_chain_alloc(hammer2_dev_t *hmp, hammer2_pfs_t *pmp,
 
 	/*
 	 * Special case - radix of 0 indicates a chain that does not
-	 * need a data reference (context is completely embedded in the
-	 * bref).
+	 * need a data reference (context is completely embedded in the bref).
 	 */
 	if ((int)(bref->data_off & HAMMER2_OFF_MASK_RADIX))
 		bytes = 1U << (int)(bref->data_off & HAMMER2_OFF_MASK_RADIX);
@@ -194,13 +194,14 @@ hammer2_chain_alloc(hammer2_dev_t *hmp, hammer2_pfs_t *pmp,
 }
 
 /*
- * A common function to initialize chains including vchain.
+ * A common function to initialize chains including fchain and vchain.
  */
 void
 hammer2_chain_init(hammer2_chain_t *chain)
 {
 	RB_INIT(&chain->core.rbtree);
 	hammer2_mtx_init(&chain->lock, "h2ch_lk");
+	hammer2_mtx_init(&chain->diolk, "h2ch_dlk");
 	rw_init(&chain->inp_lock, "h2ch_inplk");
 	chain->inp_cv = kstrdup("h2ch_inpcv");
 	hammer2_spin_init(&chain->core.spin, "h2ch_cosp");
@@ -238,18 +239,28 @@ hammer2_chain_ref_hold(hammer2_chain_t *chain)
 
 /*
  * Insert the chain in the core rbtree.
+ *
+ * Normal insertions are placed in the live rbtree.  Insertion of a deleted
+ * chain is a special case used by the flush code that is placed on the
+ * unstaged deleted list to avoid confusing the live view.
  */
+#define HAMMER2_CHAIN_INSERT_SPIN	0x0001
+#define HAMMER2_CHAIN_INSERT_LIVE	0x0002
+#define HAMMER2_CHAIN_INSERT_RACE	0x0004
+
 static int
-hammer2_chain_insert(hammer2_chain_t *parent, hammer2_chain_t *chain,
+hammer2_chain_insert(hammer2_chain_t *parent, hammer2_chain_t *chain, int flags,
     int generation)
 {
 	hammer2_chain_t *xchain __diagused;
 	int error = 0;
 
-	hammer2_spin_ex(&parent->core.spin);
+	if (flags & HAMMER2_CHAIN_INSERT_SPIN)
+		hammer2_spin_ex(&parent->core.spin);
 
 	/* Interlocked by spinlock, check for race. */
-	if (parent->core.generation != generation) {
+	if ((flags & HAMMER2_CHAIN_INSERT_RACE) &&
+	    parent->core.generation != generation) {
 		error = HAMMER2_ERROR_EAGAIN;
 		goto failed;
 	}
@@ -263,8 +274,17 @@ hammer2_chain_insert(hammer2_chain_t *parent, hammer2_chain_t *chain,
 	chain->parent = parent;
 	++parent->core.chain_count;
 	++parent->core.generation; /* XXX incs for _get() too */
+#if 0
+	/*
+	 * We have to keep track of the effective live-view blockref count
+	 * so the create code knows when to push an indirect block.
+	 */
+	if (flags & HAMMER2_CHAIN_INSERT_LIVE)
+		atomic_add_int(&parent->core.live_count, 1);
+#endif
 failed:
-	hammer2_spin_unex(&parent->core.spin);
+	if (flags & HAMMER2_CHAIN_INSERT_SPIN)
+		hammer2_spin_unex(&parent->core.spin);
 
 	return (error);
 }
@@ -366,10 +386,20 @@ hammer2_chain_rehold(hammer2_chain_t *chain)
  * the mutex exclusively locked, refs == 1, and lockcnt 0.  SMP races are
  * possible against refs and lockcnt.  We must dispose of the mutex on chain.
  *
- * This function returns an unlocked chain for recursive drop or NULL.  It
- * can return the same chain if it determines it has raced another ref.
+ * This function returns an unlocked chain for recursive drop or NULL.
+ * It can return the same chain if it determines it has raced another ref.
+ *
+ * --
+ * When two chains need to be recursively dropped we use the chain we
+ * would otherwise free to placehold the additional chain.  It's a bit
+ * convoluted but we can't just recurse without potentially blowing out
+ * the kernel stack.
  *
  * The chain cannot be freed if it has any children.
+ * The chain cannot be freed if flagged MODIFIED unless we can dispose of it.
+ * The chain cannot be freed if flagged UPDATE unless we can dispose of it.
+ * Any dedup registration can remain intact.
+ *
  * The core spinlock is allowed to nest child-to-parent (not parent-to-child).
  */
 static hammer2_chain_t *
@@ -388,13 +418,45 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 	hammer2_spin_ex(&chain->core.spin);
 
 	if (chain->parent != NULL) {
-		/* Nothing to do for read-only mount. */
+		/*
+		 * If the chain has a parent the UPDATE bit prevents scrapping
+		 * as the chain is needed to properly flush the parent.  Try
+		 * to complete the 1->0 transition and return NULL.  Retry
+		 * (return chain) if we are unable to complete the 1->0
+		 * transition, else return NULL (nothing more to do).
+		 *
+		 * If the chain has a parent the MODIFIED bit prevents
+		 * scrapping.
+		 *
+		 * Chains with UPDATE/MODIFIED are *not* put on the LRU list!
+		 */
+		if (chain->flags &
+		    (HAMMER2_CHAIN_UPDATE | HAMMER2_CHAIN_MODIFIED)) {
+			if (atomic_cmpset_int(&chain->refs, 1, 0)) {
+				hammer2_spin_unex(&chain->core.spin);
+				hammer2_chain_assert_no_data(chain);
+				hammer2_mtx_unlock(&chain->lock);
+				chain = NULL;
+			} else {
+				hammer2_spin_unex(&chain->core.spin);
+				hammer2_mtx_unlock(&chain->lock);
+			}
+			return (chain);
+		}
+		/* spinlock still held */
 	} else if (chain->bref.type == HAMMER2_BREF_TYPE_VOLUME ||
-		   chain->bref.type == HAMMER2_BREF_TYPE_FREEMAP) {
-		/* Nothing to do for read-only mount. */
+	    chain->bref.type == HAMMER2_BREF_TYPE_FREEMAP) {
+		/*
+		 * Retain the static vchain and fchain.  Clear bits that
+		 * are not relevant.  Do not clear the MODIFIED bit,
+		 * and certainly do not put it on the delayed-flush queue.
+		 */
+		atomic_clear_int(&chain->flags, HAMMER2_CHAIN_UPDATE);
 	} else {
 		/*
 		 * The chain has no parent and can be flagged for destruction.
+		 * Since it has no parent, UPDATE can also be cleared.
+		 *
 		 * This can happen for e.g. via
 		 *  hammer2_chain_lookup()
 		 *    hammer2_chain_get()
@@ -403,7 +465,41 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 		 *        hammer2_chain_lastdrop()
 		 */
 		atomic_set_int(&chain->flags, HAMMER2_CHAIN_DESTROY);
+		if (chain->flags & HAMMER2_CHAIN_UPDATE)
+			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_UPDATE);
+
+		/*
+		 * If the chain has children we must propagate the DESTROY
+		 * flag downward and rip the disconnected topology apart.
+		 * This is accomplished by calling hammer2_flush() on the
+		 * chain.
+		 *
+		 * Any dedup is already handled by the underlying DIO, so
+		 * we do not have to specifically flush it here.
+		 */
+		if (chain->core.chain_count) {
+			hammer2_spin_unex(&chain->core.spin);
+			hammer2_flush(chain,
+			    HAMMER2_FLUSH_TOP | HAMMER2_FLUSH_ALL);
+			hammer2_mtx_unlock(&chain->lock);
+			return(chain); /* retry drop */
+		}
+
+		/*
+		 * Otherwise we can scrap the MODIFIED bit if it is set,
+		 * and continue along the freeing path.
+		 *
+		 * Be sure to clean-out any dedup bits.  Without a parent
+		 * this chain will no longer be visible to the flush code.
+		 * Easy check data_off to avoid the volume root.
+		 */
+		if (chain->flags & HAMMER2_CHAIN_MODIFIED) {
+			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_MODIFIED);
+			atomic_add_long(&hammer2_count_modified_chains, -1);
+		}
+		/* spinlock still held */
 	}
+	/* spinlock still held */
 
 	/*
 	 * If any children exist we must leave the chain intact with refs == 0.
@@ -548,8 +644,21 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 		 * 1->0 transition successful, parent spin held to prevent
 		 * new lookups, chain spinlock held to protect parent field.
 		 * Remove chain from the parent.
+		 *
+		 * If the chain is being removed from the parent's rbtree but
+		 * is not blkmapped, we have to adjust live_count downward.  If
+		 * it is blkmapped then the blockref is retained in the parent
+		 * as is its associated live_count.  This case can occur when
+		 * a chain added to the topology is unable to flush and is
+		 * then later deleted.
 		 */
 		if (chain->flags & HAMMER2_CHAIN_ONRBTREE) {
+			/* XXX live_count is not needed yet
+			if ((parent->flags & HAMMER2_CHAIN_COUNTEDBREFS) &&
+			    (chain->flags & HAMMER2_CHAIN_BLKMAPPED) == 0) {
+				atomic_add_int(&parent->core.live_count, -1);
+			}
+			*/
 			RB_REMOVE(hammer2_chain_tree, &parent->core.rbtree,
 			    chain);
 			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_ONRBTREE);
@@ -598,9 +707,19 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 	 * All locks are gone, no pointers remain to the chain, finish
 	 * freeing it.
 	 */
+	KKASSERT((chain->flags &
+	    (HAMMER2_CHAIN_UPDATE | HAMMER2_CHAIN_MODIFIED)) == 0);
+
+	/*
+	 * Once chain resources are gone we can use the now dead chain
+	 * structure to placehold what might otherwise require a recursive
+	 * drop, because we have potentially two things to drop and can only
+	 * return one directly.
+	 */
 	if (chain->flags & HAMMER2_CHAIN_ALLOCATED) {
 		atomic_clear_int(&chain->flags, HAMMER2_CHAIN_ALLOCATED);
 		hammer2_mtx_destroy(&chain->lock);
+		hammer2_mtx_destroy(&chain->diolk);
 		kstrfree(chain->inp_cv);
 		hammer2_spin_destroy(&chain->core.spin);
 		chain->hmp = NULL;
@@ -701,8 +820,8 @@ hammer2_chain_drop_data(hammer2_chain_t *chain)
 			if (chain->data != NULL) {
 				hammer2_spin_unex(&chain->core.spin);
 				hpanic("chain data not NULL: "
-				    "chain=%p refs=%d bref=%016jx.%02x "
-				    "parent=%p dio=%p data=%p",
+				    "chain %p refs %d bref %016jx.%02x "
+				    "parent %p dio %p data %p",
 				    chain, chain->refs, chain->bref.data_off,
 				    chain->bref.type, chain->parent, chain->dio,
 				    chain->data);
@@ -739,6 +858,10 @@ hammer2_chain_drop_data(hammer2_chain_t *chain)
  *
  * NOTE: Embedded elements (volume header, inodes) are always resolved
  *	 regardless.
+ *
+ * NOTE: Specifying HAMMER2_RESOLVE_ALWAYS on a newly-created non-embedded
+ *	 element will instantiate and zero its buffer, and flush it on
+ *	 release.
  *
  * NOTE: (data) elements are normally locked RESOLVE_MAYBE
  *	 so as not to instantiate a device buffer, which could alias against
@@ -797,6 +920,8 @@ hammer2_chain_lock(hammer2_chain_t *chain, int how)
 	case HAMMER2_RESOLVE_NEVER:
 		return (0);
 	case HAMMER2_RESOLVE_MAYBE:
+		if (chain->flags & HAMMER2_CHAIN_INITIAL)
+			return (0);
 		if (chain->bref.type == HAMMER2_BREF_TYPE_DATA)
 			return (0);
 		/* fall through */
@@ -864,9 +989,9 @@ again:
 	error = hammer2_io_bread(hmp, bref->type, bref->data_off, chain->bytes,
 	    &chain->dio);
 	if (error) {
+		hprintf("blockref type %d I/O error %d at %016jx\n",
+		    chain->bref.type, error, (intmax_t)bref->data_off);
 		chain->error = HAMMER2_ERROR_EIO;
-		hprintf("bread error %d at data_off %016jx\n",
-		    error, (intmax_t)bref->data_off);
 		hammer2_io_bqrelse(&chain->dio);
 		goto done;
 	}
@@ -894,13 +1019,14 @@ again:
 		 * cache, which might not be true (need biodep on flush
 		 * to calculate crc?  or simple crc?).
 		 */
-	} if ((chain->flags & HAMMER2_CHAIN_TESTEDGOOD) == 0) {
+	} else if ((chain->flags & HAMMER2_CHAIN_TESTEDGOOD) == 0) {
 		if (hammer2_chain_testcheck(chain, bdata) == 0)
 			chain->error = HAMMER2_ERROR_CHECK;
 		else
 			atomic_set_int(&chain->flags, HAMMER2_CHAIN_TESTEDGOOD);
 	}
 
+	/* Setup the data pointer by pointing it into the buffer. */
 	switch (bref->type) {
 	case HAMMER2_BREF_TYPE_VOLUME:
 	case HAMMER2_BREF_TYPE_FREEMAP:
@@ -1026,11 +1152,416 @@ hammer2_chain_countbrefs(hammer2_chain_t *chain, hammer2_blockref_t *base,
 	hammer2_spin_unex(&chain->core.spin);
 }
 
+/*
+ * Set the chain modified so its data can be changed by the caller, or
+ * install deduplicated data.  The caller must call this routine for each
+ * set of modifications it makes, even if the chain is already flagged
+ * MODIFIED.
+ *
+ * Sets bref.modify_tid to mtid only if mtid != 0.  Note that bref.modify_tid
+ * is a CLC (cluster level change) field and is not updated by parent
+ * propagation during a flush.
+ *
+ * Returns an appropriate HAMMER2_ERROR_* code, which will generally reflect
+ * chain->error except for HAMMER2_ERROR_ENOSPC.  If the allocation fails
+ * due to no space available, HAMMER2_ERROR_ENOSPC is returned and the chain
+ * remains unmodified with its old data ref intact and chain->error
+ * unchanged.
+ *
+ *		Dedup Handling
+ *
+ * If the DEDUPABLE flag is set in the chain the storage must be reallocated
+ * even if the chain is still flagged MODIFIED.  In this case the chain's
+ * DEDUPABLE flag will be cleared once the new storage has been assigned.
+ *
+ * If the caller passes a non-zero dedup_off we will use it to assign the
+ * new storage.  The MODIFIED flag will be *CLEARED* in this case, and
+ * DEDUPABLE will be set (NOTE: the UPDATE flag is always set).  The caller
+ * must not modify the data content upon return.
+ */
 int
 hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
     hammer2_off_t dedup_off, int flags)
 {
-	return (0);
+	hammer2_dev_t *hmp = chain->hmp;
+	hammer2_io_t *dio, *tio;
+	int wasinitial, setmodified, setupdate, newmod, error = 0;
+	char *bdata;
+
+	hammer2_mtx_assert_ex(&chain->lock);
+
+	/*
+	 * Data is not optional for freemap chains (we must always be sure
+	 * to copy the data on COW storage allocations).
+	 */
+	if (chain->bref.type == HAMMER2_BREF_TYPE_FREEMAP_NODE ||
+	    chain->bref.type == HAMMER2_BREF_TYPE_FREEMAP_LEAF)
+		KKASSERT((chain->flags & HAMMER2_CHAIN_INITIAL) ||
+		    (flags & HAMMER2_MODIFY_OPTDATA) == 0);
+
+	/*
+	 * Data must be resolved if already assigned, unless explicitly
+	 * flagged otherwise.  If we cannot safety load the data the
+	 * modification fails and we return early.
+	 */
+	if (chain->data == NULL && chain->bytes != 0 &&
+	    (flags & HAMMER2_MODIFY_OPTDATA) == 0 &&
+	    (chain->bref.data_off & ~HAMMER2_OFF_MASK_RADIX)) {
+		hammer2_chain_load_data(chain);
+		if (chain->error)
+			return (chain->error);
+	}
+
+	/*
+	 * Set MODIFIED to indicate that the chain has been modified.  A new
+	 * allocation is required when modifying a chain.
+	 *
+	 * Set UPDATE to ensure that the blockref is updated in the parent.
+	 *
+	 * If MODIFIED is already set determine if we can reuse the assigned
+	 * data block or if we need a new data block.
+	 */
+	if ((chain->flags & HAMMER2_CHAIN_MODIFIED) == 0) {
+		/* Must set modified bit. */
+		atomic_add_long(&hammer2_count_modified_chains, 1);
+		atomic_set_int(&chain->flags, HAMMER2_CHAIN_MODIFIED);
+		setmodified = 1;
+
+		/*
+		 * We may be able to avoid a copy-on-write if the chain's
+		 * check mode is set to NONE and the chain's current
+		 * modify_tid is beyond the last explicit snapshot tid.
+		 *
+		 * This implements HAMMER2's overwrite-in-place feature.
+		 *
+		 * NOTE! This data-block cannot be used as a de-duplication
+		 *	 source when the check mode is set to NONE.
+		 */
+		if ((chain->bref.type == HAMMER2_BREF_TYPE_DATA ||
+		    chain->bref.type == HAMMER2_BREF_TYPE_DIRENT) &&
+		    (chain->flags & HAMMER2_CHAIN_INITIAL) == 0 &&
+		    (chain->flags & HAMMER2_CHAIN_DEDUPABLE) == 0 &&
+		    HAMMER2_DEC_CHECK(chain->bref.methods) ==
+		    HAMMER2_CHECK_NONE && chain->pmp &&
+		    chain->bref.modify_tid >
+		    chain->pmp->iroot->meta.pfs_lsnap_tid) {
+			/* Sector overwrite allowed. */
+			newmod = 0;
+		} else if ((hmp->hflags & HMNT2_EMERG) && chain->pmp &&
+		    chain->bref.modify_tid >
+		    chain->pmp->iroot->meta.pfs_lsnap_tid) {
+			/*
+			 * If in emergency delete mode then do a modify-in-
+			 * place on any chain type belonging to the PFS as
+			 * long as it doesn't mess up a snapshot.  We might
+			 * be forced to do this anyway a little further down
+			 * in the code if the allocation fails.
+			 *
+			 * Also note that in emergency mode, these modify-in-
+			 * place operations are NOT SAFE.  A storage failure,
+			 * power failure, or panic can corrupt the filesystem.
+			 */
+			newmod = 0;
+		} else {
+			/* Sector overwrite not allowed, must copy-on-write. */
+			newmod = 1;
+		}
+	} else if (chain->flags & HAMMER2_CHAIN_DEDUPABLE) {
+		/*
+		 * If the modified chain was registered for dedup we need
+		 * a new allocation.  This only happens for delayed-flush
+		 * chains (i.e. which run through the front-end buffer
+		 * cache).
+		 */
+		newmod = 1;
+		setmodified = 0;
+	} else {
+		/* Already flagged modified, no new allocation is needed. */
+		newmod = 0;
+		setmodified = 0;
+	}
+
+	/* Flag parent update required. */
+	if ((chain->flags & HAMMER2_CHAIN_UPDATE) == 0) {
+		atomic_set_int(&chain->flags, HAMMER2_CHAIN_UPDATE);
+		setupdate = 1;
+	} else {
+		setupdate = 0;
+	}
+
+	/*
+	 * The XOP code returns held but unlocked focus chains.  This
+	 * prevents the chain from being destroyed but does not prevent
+	 * it from being modified.  diolk is used to interlock modifications
+	 * against XOP frontend accesses to the focus.
+	 *
+	 * This allows us to theoretically avoid deadlocking the frontend
+	 * if one of the backends lock up by not formally locking the
+	 * focused chain in the frontend.  In addition, the synchronization
+	 * code relies on this mechanism to avoid deadlocking concurrent
+	 * synchronization threads.
+	 */
+	hammer2_mtx_ex(&chain->diolk);
+
+	/*
+	 * The modification or re-modification requires an allocation and
+	 * possible COW.  If an error occurs, the previous content and data
+	 * reference is retained and the modification fails.
+	 *
+	 * If dedup_off is non-zero, the caller is requesting a deduplication
+	 * rather than a modification.  The MODIFIED bit is not set and the
+	 * data offset is set to the deduplication offset.  The data cannot
+	 * be modified.
+	 *
+	 * NOTE: The dedup offset is allowed to be in a partially free state
+	 *	 and we must be sure to reset it to a fully allocated state
+	 *	 to force two bulkfree passes to free it again.
+	 *
+	 * NOTE: Only applicable when chain->bytes != 0.
+	 *
+	 * XXX Can a chain already be marked MODIFIED without a data
+	 * assignment?  If not, assert here instead of testing the case.
+	 */
+	if (chain != &hmp->vchain && chain != &hmp->fchain && chain->bytes) {
+		if ((chain->bref.data_off & ~HAMMER2_OFF_MASK_RADIX) == 0 ||
+		    newmod) {
+			/*
+			 * NOTE: We do not have to remove the dedup
+			 *	 registration because the area is still
+			 *	 allocated and the underlying DIO will
+			 *	 still be flushed.
+			 */
+			if (dedup_off) {
+				chain->bref.data_off = dedup_off;
+				if ((int)(dedup_off & HAMMER2_OFF_MASK_RADIX))
+					chain->bytes = 1 <<
+					    (int)(dedup_off &
+					    HAMMER2_OFF_MASK_RADIX);
+				else
+					chain->bytes = 0;
+				chain->error = 0;
+				atomic_clear_int(&chain->flags,
+				    HAMMER2_CHAIN_MODIFIED);
+				atomic_add_long(&hammer2_count_modified_chains,
+				    -1);
+				hammer2_freemap_adjust(hmp, &chain->bref,
+				    HAMMER2_FREEMAP_DORECOVER);
+				atomic_set_int(&chain->flags,
+				    HAMMER2_CHAIN_DEDUPABLE);
+			} else {
+				error = hammer2_freemap_alloc(chain,
+				    chain->bytes);
+				atomic_clear_int(&chain->flags,
+				    HAMMER2_CHAIN_DEDUPABLE);
+
+				/*
+				 * If we are unable to allocate a new block
+				 * but we are in emergency mode, issue a
+				 * warning to the console and reuse the same
+				 * block.
+				 *
+				 * We behave as if the allocation were
+				 * successful.
+				 *
+				 * THIS IS IMPORTANT: These modifications
+				 * are virtually guaranteed to corrupt any
+				 * snapshots related to this filesystem.
+				 */
+				if (error && (hmp->hflags & HMNT2_EMERG)) {
+					error = 0;
+					chain->bref.flags |=
+					    HAMMER2_BREF_FLAG_EMERG_MIP;
+				} else if (error == 0) {
+					chain->bref.flags &=
+					    ~HAMMER2_BREF_FLAG_EMERG_MIP;
+				}
+			}
+		}
+	}
+
+	/*
+	 * Stop here if error.  We have to undo any flag bits we might
+	 * have set above.
+	 */
+	if (error) {
+		if (setmodified) {
+			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_MODIFIED);
+			atomic_add_long(&hammer2_count_modified_chains, -1);
+		}
+		if (setupdate)
+			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_UPDATE);
+		hammer2_mtx_unlock(&chain->diolk);
+		return (error);
+	}
+
+	/*
+	 * Update mirror_tid and modify_tid.  modify_tid is only updated
+	 * if not passed as zero (during flushes, parent propagation passes
+	 * the value 0).
+	 *
+	 * NOTE: chain->pmp could be the device spmp.
+	 */
+	chain->bref.mirror_tid = hmp->voldata.mirror_tid + 1;
+	if (mtid)
+		chain->bref.modify_tid = mtid;
+
+	/*
+	 * Set BLKMAPUPD to tell the flush code that an existing blockmap entry
+	 * requires updating as well as to tell the delete code that the
+	 * chain's blockref might not exactly match (in terms of physical size
+	 * or block offset) the one in the parent's blocktable.  The base key
+	 * of course will still match.
+	 */
+	if (chain->flags & HAMMER2_CHAIN_BLKMAPPED)
+		atomic_set_int(&chain->flags, HAMMER2_CHAIN_BLKMAPUPD);
+
+	/*
+	 * Short-cut data block handling when the caller does not need an
+	 * actual data reference to (aka OPTDATA), as long as the chain does
+	 * not already have a data pointer to the data and no de-duplication
+	 * occurred.
+	 *
+	 * This generally means that the modifications are being done via the
+	 * logical buffer cache.
+	 *
+	 * NOTE: If deduplication occurred we have to run through the data
+	 *	 stuff to clear INITIAL, and the caller will likely want to
+	 *	 assign the check code anyway.  Leaving INITIAL set on a
+	 *	 dedup can be deadly (it can cause the block to be zero'd!).
+	 *
+	 * This code also handles bytes == 0 (most dirents).
+	 */
+	if (chain->bref.type == HAMMER2_BREF_TYPE_DATA &&
+	    (flags & HAMMER2_MODIFY_OPTDATA) && chain->data == NULL) {
+		if (dedup_off == 0) {
+			KKASSERT(chain->dio == NULL);
+			goto skip;
+		}
+	}
+
+	/*
+	 * Clearing the INITIAL flag (for indirect blocks) indicates that
+	 * we've processed the uninitialized storage allocation.
+	 *
+	 * If this flag is already clear we are likely in a copy-on-write
+	 * situation but we have to be sure NOT to bzero the storage if
+	 * no data is present.
+	 *
+	 * Clearing of NOTTESTED is allowed if the MODIFIED bit is set.
+	 */
+	if (chain->flags & HAMMER2_CHAIN_INITIAL) {
+		atomic_clear_int(&chain->flags, HAMMER2_CHAIN_INITIAL);
+		wasinitial = 1;
+	} else {
+		wasinitial = 0;
+	}
+
+	/* Instantiate data buffer and possibly execute COW operation. */
+	switch (chain->bref.type) {
+	case HAMMER2_BREF_TYPE_VOLUME:
+	case HAMMER2_BREF_TYPE_FREEMAP:
+		/* The data is embedded, no copy-on-write operation needed. */
+		KKASSERT(chain->dio == NULL);
+		break;
+	case HAMMER2_BREF_TYPE_DIRENT:
+		/* The data might be fully embedded. */
+		if (chain->bytes == 0) {
+			KKASSERT(chain->dio == NULL);
+			break;
+		}
+		/* fall through */
+	case HAMMER2_BREF_TYPE_INODE:
+	case HAMMER2_BREF_TYPE_FREEMAP_LEAF:
+	case HAMMER2_BREF_TYPE_DATA:
+	case HAMMER2_BREF_TYPE_INDIRECT:
+	case HAMMER2_BREF_TYPE_FREEMAP_NODE:
+		/*
+		 * Perform the copy-on-write operation
+		 *
+		 * zero-fill or copy-on-write depending on whether
+		 * chain->data exists or not and set the dirty state for
+		 * the new buffer.  hammer2_io_new() will handle the
+		 * zero-fill.
+		 *
+		 * If a dedup_off was supplied this is an existing block
+		 * and no COW, copy, or further modification is required.
+		 */
+		KKASSERT(chain != &hmp->vchain && chain != &hmp->fchain);
+
+		if (wasinitial && dedup_off == 0)
+			error = hammer2_io_new(hmp, chain->bref.type,
+			    chain->bref.data_off, chain->bytes, &dio);
+		else
+			error = hammer2_io_bread(hmp, chain->bref.type,
+			    chain->bref.data_off, chain->bytes, &dio);
+
+		/*
+		 * If an I/O error occurs make sure callers cannot accidently
+		 * modify the old buffer's contents and corrupt the filesystem.
+		 */
+		if (error) {
+			hprintf("blockref type %d I/O error %d at %016jx\n",
+			    chain->bref.type, error,
+			    (intmax_t)chain->bref.data_off);
+			chain->error = HAMMER2_ERROR_EIO;
+			hammer2_io_brelse(&dio);
+			hammer2_io_brelse(&chain->dio);
+			chain->data = NULL;
+			break;
+		}
+		chain->error = 0;
+		bdata = hammer2_io_data(dio, chain->bref.data_off);
+
+		if (chain->data) {
+			/* COW (unless a dedup) */
+			KKASSERT(chain->dio != NULL);
+			if (chain->data != (void *)bdata && dedup_off == 0)
+				bcopy(chain->data, bdata, chain->bytes);
+		} else if (wasinitial == 0 && dedup_off == 0) {
+			/*
+			 * We have a problem.  We were asked to COW but
+			 * we don't have any data to COW with!
+			 */
+			hpanic("no CoW data for chain %p", chain);
+		}
+
+		/*
+		 * Retire the old buffer, replace with the new.  Dirty or
+		 * redirty the new buffer.
+		 *
+		 * WARNING! The system buffer cache may have already flushed
+		 *	    the buffer, so we must be sure to [re]dirty it
+		 *	    for further modification.
+		 *
+		 *	    If dedup_off was supplied, the caller is not
+		 *	    expected to make any further modification to the
+		 *	    buffer.
+		 *
+		 * WARNING! hammer2_get_gdata() assumes dio never transitions
+		 *	    through NULL in order to optimize away unnecessary
+		 *	    diolk operations.
+		 */
+		if ((tio = chain->dio) != NULL)
+			hammer2_io_bqrelse(&tio);
+		chain->data = (void *)bdata;
+		chain->dio = dio;
+		if (dedup_off == 0)
+			hammer2_io_setdirty(dio);
+		break;
+	default:
+		hpanic("bad blockref type %d", chain->bref.type);
+		break;
+	}
+skip:
+	/*
+	 * setflush on parent indicating that the parent must recurse down
+	 * to us.  Do not call on chain itself which might already have it set.
+	 */
+	if (chain->parent)
+		hammer2_chain_setflush(chain->parent);
+	hammer2_mtx_unlock(&chain->diolk);
+
+	return (chain->error);
 }
 
 /*
@@ -1187,6 +1718,12 @@ hammer2_chain_get(hammer2_chain_t *parent, int generation,
 		chain = hammer2_chain_alloc(hmp, parent->pmp, bref);
 	/* Ref'd chain returned. */
 
+	/*
+	 * Flag that the chain is in the parent's blockmap so delete/flush
+	 * knows what to do with it.
+	 */
+	atomic_set_int(&chain->flags, HAMMER2_CHAIN_BLKMAPPED);
+
 	/* Chain must be locked to avoid unexpected ripouts. */
 	hammer2_chain_lock(chain, how);
 
@@ -1197,7 +1734,8 @@ hammer2_chain_get(hammer2_chain_t *parent, int generation,
 	 * a shared lock on the parent.
 	 */
 	KKASSERT(parent->refs > 0);
-	error = hammer2_chain_insert(parent, chain, generation);
+	error = hammer2_chain_insert(parent, chain,
+	    HAMMER2_CHAIN_INSERT_SPIN | HAMMER2_CHAIN_INSERT_RACE, generation);
 	if (error) {
 		KKASSERT((chain->flags & HAMMER2_CHAIN_ONRBTREE) == 0);
 		hammer2_chain_unlock(chain);
@@ -1432,8 +1970,18 @@ again:
 		break;
 	case HAMMER2_BREF_TYPE_FREEMAP_NODE:
 	case HAMMER2_BREF_TYPE_INDIRECT:
-		KKASSERT(parent->data);
-		base = &parent->data->npdata[0];
+		/*
+		 * Optimize indirect blocks in the INITIAL state to avoid I/O.
+		 *
+		 * Debugging: Enter permanent wait state instead of
+		 * panicing on unexpectedly NULL data for the moment.
+		 */
+		if (parent->flags & HAMMER2_CHAIN_INITIAL) {
+			base = NULL;
+		} else {
+			KKASSERT(parent->data);
+			base = &parent->data->npdata[0];
+		}
 		count = parent->bytes / sizeof(hammer2_blockref_t);
 		break;
 	case HAMMER2_BREF_TYPE_VOLUME:
@@ -1527,8 +2075,32 @@ again:
 	}
 
 	/*
+	 * Skip deleted chains (XXX cache 'i' end-of-block-array?)
+	 *
+	 * NOTE: chain's key range is not relevant as there might be
+	 *	 one-offs within the range that are not deleted.
+	 *
+	 * NOTE: Lookups can race delete-duplicate because
+	 *	 delete-duplicate does not lock the parent's core
+	 *	 (they just use the spinlock on the core).
+	 */
+	if (chain->flags & HAMMER2_CHAIN_DELETED) {
+		hprintf("skip deleted chain %016jx.%02x key %016jx\n",
+		    chain->bref.data_off, chain->bref.type, chain->bref.key);
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+		chain = NULL;
+		key_beg = *key_nextp;
+		if (key_beg == 0 || key_beg > key_end)
+			return (NULL);
+		goto again;
+	}
+
+	/*
 	 * If the chain element is an indirect block it becomes the new
-	 * parent and we loop on it.
+	 * parent and we loop on it.  We must maintain our top-down locks
+	 * to prevent the flusher from interfering (i.e. doing a
+	 * delete-duplicate and leaving us recursing down a deleted chain).
 	 *
 	 * The parent always has to be locked with at least RESOLVE_MAYBE
 	 * so we can access its data.  It might need a fixup if the caller
@@ -1611,13 +2183,16 @@ hammer2_chain_next(hammer2_chain_t **parentp, hammer2_chain_t *chain,
 			return (NULL);
 		chain = NULL;
 	} else if (parent->bref.type != HAMMER2_BREF_TYPE_INDIRECT &&
-		   parent->bref.type != HAMMER2_BREF_TYPE_FREEMAP_NODE) {
+	    parent->bref.type != HAMMER2_BREF_TYPE_FREEMAP_NODE) {
 		/* We reached the end of the iteration. */
 		return (NULL);
 	} else {
 		/*
 		 * Continue iteration with next parent unless the current
 		 * parent covers the range.
+		 *
+		 * (This also handles the case of a deleted, empty indirect
+		 * node).
 		 */
 		key_beg = parent->bref.key +
 		    ((hammer2_key_t)1 << parent->bref.keybits);
@@ -1735,8 +2310,7 @@ again:
 	case HAMMER2_BREF_TYPE_FREEMAP_NODE:
 	case HAMMER2_BREF_TYPE_INDIRECT:
 		/*
-		 * Optimize indirect blocks in the INITIAL state to avoid
-		 * I/O.
+		 * Optimize indirect blocks in the INITIAL state to avoid I/O.
 		 */
 		if (parent->flags & HAMMER2_CHAIN_INITIAL) {
 			base = NULL;
@@ -1756,9 +2330,7 @@ again:
 		count = HAMMER2_SET_COUNT;
 		break;
 	default:
-		hpanic("unrecognized blockref type %d", parent->bref.type);
-		base = NULL; /* safety */
-		count = 0; /* safety */
+		hpanic("bad blockref type %d", parent->bref.type);
 		break;
 	}
 
@@ -1849,7 +2421,6 @@ again:
 		hammer2_chain_unlock(chain);
 		hammer2_chain_drop(chain);
 		chain = NULL;
-
 		key = next_key;
 		if (key == 0) {
 			error |= HAMMER2_ERROR_EOF;
@@ -2056,16 +2627,247 @@ found:
 	return (chain);
 }
 
+/*
+ * Locate the specified block array element and delete it.  The element
+ * must exist.  The spin lock on the related chain must be held.
+ *
+ * NOTE: live_count was adjusted when the chain was deleted, so it does not
+ *	 need to be adjusted when we commit the media change.
+ */
 void
 hammer2_base_delete(hammer2_chain_t *parent, hammer2_blockref_t *base,
     int count, hammer2_chain_t *chain, hammer2_blockref_t *obref)
 {
+	hammer2_blockref_t *scan, *elm = &chain->bref;
+	hammer2_key_t key_next;
+	int i;
+
+	/*
+	 * Delete element.  Expect the element to exist.
+	 *
+	 * XXX see caller, flush code not yet sophisticated enough to prevent
+	 *     re-flushed in some cases.
+	 */
+	key_next = 0; /* max range */
+	i = hammer2_base_find(parent, base, count, &key_next, elm->key,
+	    elm->key);
+	scan = &base[i];
+
+	if (i == count || scan->type == HAMMER2_BREF_TYPE_EMPTY ||
+	    scan->key != elm->key ||
+	    ((chain->flags & HAMMER2_CHAIN_BLKMAPUPD) == 0 &&
+	    scan->keybits != elm->keybits)) {
+		hammer2_spin_unex(&parent->core.spin);
+		hpanic("delete base %p element not found at %d/%d elm %p",
+		    base, i, count, elm);
+		return;
+	}
+
+	/*
+	 * Update stats and zero the entry.
+	 * NOTE: Handle radix == 0 (0 bytes) case.
+	 */
+	if ((int)(scan->data_off & HAMMER2_OFF_MASK_RADIX))
+		parent->bref.embed.stats.data_count -= (hammer2_off_t)1 <<
+		    (int)(scan->data_off & HAMMER2_OFF_MASK_RADIX);
+
+	switch (scan->type) {
+	case HAMMER2_BREF_TYPE_INODE:
+		--parent->bref.embed.stats.inode_count;
+		/* fall through */
+	case HAMMER2_BREF_TYPE_DATA:
+		if (parent->bref.leaf_count == HAMMER2_BLOCKREF_LEAF_MAX) {
+			atomic_set_int(&chain->flags,
+			    HAMMER2_CHAIN_HINT_LEAF_COUNT);
+		} else {
+			if (parent->bref.leaf_count)
+				--parent->bref.leaf_count;
+		}
+		/* fall through */
+	case HAMMER2_BREF_TYPE_INDIRECT:
+		if (scan->type != HAMMER2_BREF_TYPE_DATA) {
+			parent->bref.embed.stats.data_count -=
+			    scan->embed.stats.data_count;
+			parent->bref.embed.stats.inode_count -=
+			    scan->embed.stats.inode_count;
+		}
+		if (scan->type == HAMMER2_BREF_TYPE_INODE)
+			break;
+		if (parent->bref.leaf_count == HAMMER2_BLOCKREF_LEAF_MAX) {
+			atomic_set_int(&chain->flags,
+			    HAMMER2_CHAIN_HINT_LEAF_COUNT);
+		} else {
+			if (parent->bref.leaf_count <= scan->leaf_count)
+				parent->bref.leaf_count = 0;
+			else
+				parent->bref.leaf_count -= scan->leaf_count;
+		}
+		break;
+	case HAMMER2_BREF_TYPE_DIRENT:
+		if (parent->bref.leaf_count == HAMMER2_BLOCKREF_LEAF_MAX) {
+			atomic_set_int(&chain->flags,
+			    HAMMER2_CHAIN_HINT_LEAF_COUNT);
+		} else {
+			if (parent->bref.leaf_count)
+				--parent->bref.leaf_count;
+		}
+	default:
+		break;
+	}
+
+	if (obref)
+		*obref = *scan;
+	bzero(scan, sizeof(*scan));
+
+	/* We can only optimize parent->core.live_zero for live chains. */
+	if (parent->core.live_zero == i + 1) {
+		while (--i >= 0 && base[i].type == HAMMER2_BREF_TYPE_EMPTY)
+			;
+		parent->core.live_zero = i + 1;
+	}
+
+	/* Clear appropriate blockmap flags in chain. */
+	atomic_clear_int(&chain->flags,
+	    HAMMER2_CHAIN_BLKMAPPED | HAMMER2_CHAIN_BLKMAPUPD);
 }
 
+/*
+ * Insert the specified element.  The block array must not already have the
+ * element and must have space available for the insertion.
+ * The spin lock on the related chain must be held.
+ *
+ * NOTE: live_count was adjusted when the chain was deleted, so it does not
+ *	 need to be adjusted when we commit the media change.
+ */
 void
 hammer2_base_insert(hammer2_chain_t *parent, hammer2_blockref_t *base,
     int count, hammer2_chain_t *chain, hammer2_blockref_t *elm)
 {
+	hammer2_key_t key_next, xkey;
+	int i, j, k, l, u = 1;
+
+	/*
+	 * Insert new element.  Expect the element to not already exist
+	 * unless we are replacing it.
+	 *
+	 * XXX see caller, flush code not yet sophisticated enough to prevent
+	 *     re-flushed in some cases.
+	 */
+	key_next = 0; /* max range */
+	i = hammer2_base_find(parent, base, count, &key_next, elm->key,
+	    elm->key);
+
+	/*
+	 * Shortcut fill optimization, typical ordered insertion(s) may not
+	 * require a search.
+	 */
+	KKASSERT(i >= 0 && i <= count);
+
+	/* Set appropriate blockmap flags in chain (if not NULL). */
+	if (chain)
+		atomic_set_int(&chain->flags, HAMMER2_CHAIN_BLKMAPPED);
+
+	/* Update stats and zero the entry. */
+	if ((int)(elm->data_off & HAMMER2_OFF_MASK_RADIX))
+		parent->bref.embed.stats.data_count += (hammer2_off_t)1 <<
+		    (int)(elm->data_off & HAMMER2_OFF_MASK_RADIX);
+
+	switch (elm->type) {
+	case HAMMER2_BREF_TYPE_INODE:
+		++parent->bref.embed.stats.inode_count;
+		/* fall through */
+	case HAMMER2_BREF_TYPE_DATA:
+		if (parent->bref.leaf_count != HAMMER2_BLOCKREF_LEAF_MAX)
+			++parent->bref.leaf_count;
+		/* fall through */
+	case HAMMER2_BREF_TYPE_INDIRECT:
+		if (elm->type != HAMMER2_BREF_TYPE_DATA) {
+			parent->bref.embed.stats.data_count +=
+			    elm->embed.stats.data_count;
+			parent->bref.embed.stats.inode_count +=
+			    elm->embed.stats.inode_count;
+		}
+		if (elm->type == HAMMER2_BREF_TYPE_INODE)
+			break;
+		if (parent->bref.leaf_count + elm->leaf_count <
+		    HAMMER2_BLOCKREF_LEAF_MAX)
+			parent->bref.leaf_count += elm->leaf_count;
+		else
+			parent->bref.leaf_count = HAMMER2_BLOCKREF_LEAF_MAX;
+		break;
+	case HAMMER2_BREF_TYPE_DIRENT:
+		if (parent->bref.leaf_count != HAMMER2_BLOCKREF_LEAF_MAX)
+			++parent->bref.leaf_count;
+		break;
+	default:
+		break;
+	}
+
+	/* We can only optimize parent->core.live_zero for live chains. */
+	if (i == count && parent->core.live_zero < count) {
+		i = parent->core.live_zero++;
+		base[i] = *elm;
+		return;
+	}
+
+	xkey = elm->key + ((hammer2_key_t)1 << elm->keybits) - 1;
+	if (i != count && (base[i].key < elm->key || xkey >= base[i].key)) {
+		hammer2_spin_unex(&parent->core.spin);
+		hpanic("insert base %p overlapping elements at %d/%d elm %p",
+		    base, i, count, elm);
+	}
+
+	/* Try to find an empty slot before or after. */
+	j = i;
+	k = i;
+	while (j > 0 || k < count) {
+		--j;
+		if (j >= 0 && base[j].type == HAMMER2_BREF_TYPE_EMPTY) {
+			if (j == i - 1) {
+				base[j] = *elm;
+			} else {
+				bcopy(&base[j+1], &base[j],
+				    (i - j - 1) * sizeof(*base));
+				base[i - 1] = *elm;
+			}
+			goto validate;
+		}
+		++k;
+		if (k < count && base[k].type == HAMMER2_BREF_TYPE_EMPTY) {
+			bcopy(&base[i], &base[i+1],
+			    (k - i) * sizeof(hammer2_blockref_t));
+			base[i] = *elm;
+			/*
+			 * We can only update parent->core.live_zero for live
+			 * chains.
+			 */
+			if (parent->core.live_zero <= k)
+				parent->core.live_zero = k + 1;
+			u = 2;
+			goto validate;
+		}
+	}
+	hpanic("no room");
+
+	/* Debugging */
+validate:
+	key_next = 0;
+	for (l = 0; l < count; ++l) {
+		if (base[l].type != HAMMER2_BREF_TYPE_EMPTY) {
+			key_next = base[l].key +
+			    ((hammer2_key_t)1 << base[l].keybits) - 1;
+			break;
+		}
+	}
+	while (++l < count) {
+		if (base[l].type != HAMMER2_BREF_TYPE_EMPTY) {
+			if (base[l].key <= key_next)
+				hpanic("base_insert %d %d,%d,%d fail %p:%d",
+				    u, i, j, k, base, l);
+			key_next = base[l].key +
+			    ((hammer2_key_t)1 << base[l].keybits) - 1;
+		}
+	}
 }
 
 /*
@@ -2098,7 +2900,6 @@ hammer2_chain_setcheck(hammer2_chain_t *chain, void *bdata)
 			uint8_t digest[SHA256_DIGEST_LENGTH];
 			uint64_t digest64[SHA256_DIGEST_LENGTH/8];
 		} u;
-
 		SHA256Init(&hash_ctx);
 		SHA256Update(&hash_ctx, bdata, chain->bytes);
 		SHA256Final(u.digest, &hash_ctx);
@@ -2112,7 +2913,7 @@ hammer2_chain_setcheck(hammer2_chain_t *chain, void *bdata)
 		    hammer2_icrc32(bdata, chain->bytes);
 		break;
 	default:
-		hpanic("unknown check type %02x", chain->bref.methods);
+		hpanic("bad check type %02x", chain->bref.methods);
 		break;
 	}
 }
@@ -2127,7 +2928,7 @@ hammer2_chain_testcheck(const hammer2_chain_t *chain, void *bdata)
 	int r = 0;
 
 	if (chain->flags & HAMMER2_CHAIN_NOTTESTED)
-		return 1;
+		return (1);
 
 	switch (HAMMER2_DEC_CHECK(chain->bref.methods)) {
 	case HAMMER2_CHECK_NONE:
@@ -2149,7 +2950,6 @@ hammer2_chain_testcheck(const hammer2_chain_t *chain, void *bdata)
 			uint8_t digest[SHA256_DIGEST_LENGTH];
 			uint64_t digest64[SHA256_DIGEST_LENGTH/8];
 		} u;
-
 		SHA256Init(&hash_ctx);
 		SHA256Update(&hash_ctx, bdata, chain->bytes);
 		SHA256Final(u.digest, &hash_ctx);
@@ -2163,13 +2963,13 @@ hammer2_chain_testcheck(const hammer2_chain_t *chain, void *bdata)
 		    hammer2_icrc32(bdata, chain->bytes);
 		break;
 	default:
-		hpanic("unknown check type %02x", chain->bref.methods);
+		hpanic("bad check type %02x", chain->bref.methods);
 		break;
 	}
 
 	if (r == 0 && count < 1000) {
-		hprintf("failed: chain %s %016jx %016jx/%-2d meth=%02x "
-		    "mir=%016jx mod=%016jx flags=%08x\n",
+		hprintf("failed: chain %s %016jx %016jx/%-2d meth %02x "
+		    "mir %016jx mod %016jx flags %08x\n",
 		    hammer2_breftype_to_str(chain->bref.type),
 		    chain->bref.data_off, chain->bref.key, chain->bref.keybits,
 		    chain->bref.methods, chain->bref.mirror_tid,

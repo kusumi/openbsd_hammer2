@@ -42,6 +42,7 @@
 
 #include "hammer2.h"
 #include "hammer2_lz4.h"
+#include "hammer2_xxhash.h"
 
 static int hammer2_strategy_read(struct vop_strategy_args *);
 static void hammer2_strategy_read_completion(hammer2_chain_t *,
@@ -262,7 +263,20 @@ hammer2_strategy_read_completion(hammer2_chain_t *focus, const char *data,
 		bp->b_resid = 0;
 		bp->b_error = 0;
 	} else if (focus->bref.type == HAMMER2_BREF_TYPE_DATA) {
+		/*
+		 * Data is on-media, record for live dedup.  Release the
+		 * chain (try to free it) when done.  The data is still
+		 * cached by both the buffer cache in front and the
+		 * block device behind us.  This leaves more room in the
+		 * LRU chain cache for meta-data chains which we really
+		 * want to retain.
+		 *
+		 * NOTE: Deduplication cannot be safely recorded for
+		 *	 records without a check code.
+		 */
+		hammer2_dedup_record(focus, NULL, data);
 		atomic_set_int(&focus->flags, HAMMER2_CHAIN_RELEASE);
+
 		/* Decompression and copy. */
 		switch (HAMMER2_DEC_COMP(focus->bref.methods)) {
 		case HAMMER2_COMP_LZ4:
@@ -283,10 +297,10 @@ hammer2_strategy_read_completion(hammer2_chain_t *focus, const char *data,
 			bp->b_error = 0;
 			break;
 		default:
-			hpanic("unknown compression type");
+			hpanic("bad comp type %02x", focus->bref.methods);
 		}
 	} else {
-		hpanic("unknown blockref type %d", focus->bref.type);
+		hpanic("bad blockref type %d", focus->bref.type);
 	}
 }
 
@@ -296,6 +310,112 @@ hammer2_strategy_read_completion(hammer2_chain_t *focus, const char *data,
 void
 hammer2_bioq_sync(hammer2_pfs_t *pmp)
 {
+}
+
+/*
+ * LIVE DEDUP HEURISTICS
+ *
+ * Record media and crc information for possible dedup operation.  Note
+ * that the dedup mask bits must also be set in the related DIO for a dedup
+ * to be fully validated (which is handled in the freemap allocation code).
+ *
+ * WARNING! This code is SMP safe but the heuristic allows SMP collisions.
+ *	    All fields must be loaded into locals and validated.
+ *
+ * WARNING! Should only be used for file data and directory entries,
+ *	    hammer2_chain_modify() only checks for the dedup case on data
+ *	    chains.  Also, dedup data can only be recorded for committed
+ *	    chains (so NOT strategy writes which can undergo further
+ *	    modification after the fact!).
+ */
+void
+hammer2_dedup_record(hammer2_chain_t *chain, hammer2_io_t *dio,
+    const char *data)
+{
+	hammer2_dev_t *hmp = chain->hmp;
+	hammer2_dedup_t *dedup;
+	uint64_t crc, mask;
+	int i, dticks, best = 0;
+
+	/*
+	 * We can only record a dedup if we have media data to test against.
+	 * If dedup is not enabled, return early, which allows a chain to
+	 * remain marked MODIFIED (which might have benefits in special
+	 * situations, though typically it does not).
+	 */
+	if (1 /* || hammer2_dedup_enable == 0 */)
+		return;
+	KKASSERT(0);
+
+	if (dio == NULL) {
+		dio = chain->dio;
+		if (dio == NULL)
+			return;
+	}
+
+	switch (HAMMER2_DEC_CHECK(chain->bref.methods)) {
+	case HAMMER2_CHECK_ISCSI32:
+		/*
+		 * XXX use the built-in crc (the dedup lookup sequencing
+		 * needs to be fixed so the check code is already present
+		 * when dedup_lookup is called)
+		 */
+		crc = XXH64(data, chain->bytes, XXH_HAMMER2_SEED);
+		break;
+	case HAMMER2_CHECK_XXHASH64:
+		crc = chain->bref.check.xxhash64.value;
+		break;
+	case HAMMER2_CHECK_SHA192:
+		/*
+		 * XXX use the built-in crc (the dedup lookup sequencing
+		 * needs to be fixed so the check code is already present
+		 * when dedup_lookup is called)
+		 */
+		crc = XXH64(data, chain->bytes, XXH_HAMMER2_SEED);
+		break;
+	default:
+		/*
+		 * Cannot dedup without a check code.
+		 *
+		 * NOTE: In particular, CHECK_NONE allows a sector to be
+		 *	 overwritten without copy-on-write, recording
+		 *	 a dedup block for a CHECK_NONE object would be
+		 *	 a disaster!
+		 */
+		return;
+	}
+
+	atomic_set_int(&chain->flags, HAMMER2_CHAIN_DEDUPABLE);
+
+	dedup = &hmp->heur_dedup[crc & (HAMMER2_DEDUP_HEUR_MASK & ~3)];
+	for (i = 0; i < 4; ++i) {
+		if (dedup[i].data_crc == crc) {
+			best = i;
+			break;
+		}
+		dticks = (int)(dedup[i].ticks - dedup[best].ticks);
+		if (dticks < 0 || dticks > hz * 60 * 30)
+			best = i;
+	}
+
+	dedup += best;
+	//debug_hprintf("REC %04x %016jx %016jx\n",
+	//    (int)(dedup - hmp->heur_dedup), crc, chain->bref.data_off);
+	dedup->ticks = getticks();
+	dedup->data_off = chain->bref.data_off;
+	dedup->data_crc = crc;
+
+	/*
+	 * Set the valid bits for the dedup only after we know the data
+	 * buffer has been updated.  The alloc bits were set (and the valid
+	 * bits cleared) when the media was allocated.
+	 *
+	 * This is done in two stages becuase the bulkfree code can race
+	 * the gap between allocation and data population.  Both masks must
+	 * be set before a bcmp/dedup operation is able to use the block.
+	 */
+	mask = hammer2_dedup_mask(dio, chain->bref.data_off, chain->bytes);
+	atomic_set_64(&dio->dedup_valid, mask);
 }
 
 /*

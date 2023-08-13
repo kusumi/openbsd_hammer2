@@ -30,7 +30,7 @@
 .\" OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd July 18, 2023
+.Dd August 3, 2023
 .Dt HAMMER2 8
 .Os
 .Sh NAME
@@ -41,6 +41,7 @@
 .Fl h
 .Nm
 .Op Fl s Ar path
+.Op Fl m Ar mem
 .Ar command
 .Op Ar argument ...
 .Sh DESCRIPTION
@@ -56,6 +57,13 @@ Specify the path to a mounted HAMMER2 filesystem.
 At least one PFS on a HAMMER2 filesystem must be mounted for the system
 to act on all PFSs managed by it.
 Every HAMMER2 filesystem typically has a PFS called "LOCAL" for this purpose.
+.It Fl m Ar mem
+Specify how much tracking memory to use for certain directives.
+At the moment, this option is only applicable to the
+.Cm bulkfree
+directive, allowing it to operate in fewer passes when given more memory.
+A nominal value for a 4TB drive with a ton of stuff on it would be around
+a gigabyte '-m 1g'.
 .El
 .Pp
 .Nm
@@ -82,6 +90,13 @@ operation.
 After resizing the disk partition you can issue this command on a
 mounted hammer2 filesystem to grow into the new space in the partition.
 This command is run on a live hammer2 filesystem.
+.\" ==== hash ====
+.It Cm hash Op filename...
+Compute and print the directory hash for any number of filenames.
+.\" ==== dhash ====
+.It Cm dhash Op filename...
+Compute and print the data hash for long directory entry for any number of
+filenames.
 .\" ==== pfs-list ====
 .It Cm pfs-list Op path...
 List all PFSs associated with all mounted hammer2 storage devices.
@@ -127,6 +142,17 @@ Note that hammer2 volumes associated with storage devices which have not been
 mounted in any fashion will not be listed.
 At least one hammer2 label must be mounted for the volumes on that device to be
 visible.
+.\" ==== bulkfree ====
+.It Cm bulkfree Ar path
+Run a bulkfree pass on a HAMMER2 mount.
+You can specify any PFS for the mount, the bulkfree pass is run on the
+entire partition.
+Note that it takes two passes to actually free space.
+By default this directive will use up to 1/16 physical memory to track
+the freemap.
+The amount of memory used may be overridden with the
+.Op Fl m Ar mem
+option.
 .\" ==== printinode ====
 .It Cm printinode Ar path
 Dump inode.

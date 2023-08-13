@@ -234,6 +234,72 @@ hammer2_get_logical(void)
 }
 
 /*
+ * Increment iostat, usually without any lock taken.
+ */
+void
+hammer2_inc_iostat(hammer2_iostat_t *ios, int btype, size_t bytes)
+{
+	hammer2_iostat_unit_t *p = NULL;
+#ifdef INVARIANTS
+	switch (btype) {
+	case HAMMER2_BREF_TYPE_INODE:
+		p = &ios->inode;
+		break;
+	case HAMMER2_BREF_TYPE_INDIRECT:
+		p = &ios->indirect;
+		break;
+	case HAMMER2_BREF_TYPE_DATA:
+		p = &ios->data;
+		break;
+	case HAMMER2_BREF_TYPE_DIRENT:
+		p = &ios->dirent;
+		break;
+	case HAMMER2_BREF_TYPE_FREEMAP_NODE:
+		p = &ios->freemap_node;
+		break;
+	case HAMMER2_BREF_TYPE_FREEMAP_LEAF:
+		p = &ios->freemap_leaf;
+		break;
+	case HAMMER2_BREF_TYPE_FREEMAP:
+		p = &ios->freemap;
+		break;
+	case HAMMER2_BREF_TYPE_VOLUME:
+		p = &ios->volume;
+		break;
+	default:
+		KKASSERT(0);
+		break;
+	}
+#endif
+	if (p) {
+		KKASSERT(bytes > 0);;
+		p->count++;
+		p->bytes += bytes;
+	}
+}
+
+/*
+ * Print iostat, usually without any lock taken.
+ */
+void
+hammer2_print_iostat(const hammer2_iostat_t *ios, const char *msg)
+{
+	debug_hprintf("iostat %s count: "
+	    "inode %lu indirect %lu data %lu dirent %lu freemap_node %lu "
+	    "freemap_leaf %lu freemap %lu volume %lu\n",
+	    msg, ios->inode.count, ios->indirect.count, ios->data.count,
+	    ios->dirent.count, ios->freemap_node.count, ios->freemap_leaf.count,
+	    ios->freemap.count, ios->volume.count);
+
+	debug_hprintf("iostat %s bytes: "
+	    "inode %lx indirect %lx data %lx dirent %lx freemap_node %lx "
+	    "freemap_leaf %lx freemap %lx volume %lx\n",
+	    msg, ios->inode.bytes, ios->indirect.bytes, ios->data.bytes,
+	    ios->dirent.bytes, ios->freemap_node.bytes, ios->freemap_leaf.bytes,
+	    ios->freemap.bytes, ios->volume.bytes);
+}
+
+/*
  * Check for pending signal to allow interruption.
  */
 int

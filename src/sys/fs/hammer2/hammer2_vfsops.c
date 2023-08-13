@@ -501,7 +501,7 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 		return (error);
 	}
 	/* Note that path is already in kernel space. */
-	debug_hprintf("devstr=\"%s\" mntpt=\"%s\"\n", devstr, path);
+	debug_hprintf("devstr \"%s\" mntpt \"%s\"\n", devstr, path);
 
 	/*
 	 * Extract device and label, automatically mount @DATA if no label
@@ -526,7 +526,7 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 		label++;
 	}
 
-	debug_hprintf("device=\"%s\" label=\"%s\" rdonly=%d\n",
+	debug_hprintf("device \"%s\" label \"%s\" rdonly %d\n",
 	    devstr, label, rdonly);
 
 	/* Initialize all device vnodes. */
@@ -565,7 +565,7 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 					goto next_hmp;
 			}
 			hmp = hmp_tmp;
-			debug_hprintf("hmp=%p matched\n", hmp);
+			debug_hprintf("hmp %p matched\n", hmp);
 			break;
 next_hmp:
 			continue;
@@ -890,7 +890,7 @@ next_hmp:
 	}
 
 	/* Finish the mount. */
-	debug_hprintf("hmp=%p pmp=%p\n", hmp, pmp);
+	debug_hprintf("hmp %p pmp %p\n", hmp, pmp);
 
 	if (pmp->mp) {
 		hprintf("PFS already mounted!\n");
@@ -1158,6 +1158,9 @@ again:
 
 	TAILQ_REMOVE(&hammer2_mntlist, hmp, mntentry);
 	hammer2_mtx_destroy(&hmp->iotree_lock);
+
+	hammer2_print_iostat(&hmp->iostat_read, "read");
+	hammer2_print_iostat(&hmp->iostat_write, "write");
 
 	free(hmp, M_HAMMER2, 0);
 }

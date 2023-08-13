@@ -416,10 +416,6 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 	size_t size;
 	int error, allmedia;
 
-	/* Unsupported until write support unless INVARIANTS. */
-#ifndef INVARIANTS
-	return (HAMMER2_ERROR_EOPNOTSUPP);
-#endif
 	/*
 	 * We have to clear the live dedup cache as it might have entries
 	 * that are freeable as of now.  Any new entries in the dedup cache
@@ -473,7 +469,7 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 	cbinfo.dedup = malloc(sizeof(*cbinfo.dedup) * HAMMER2_DEDUP_HEUR_SIZE,
 	    M_HAMMER2, M_WAITOK | M_ZERO);
 
-	hprintf("bulkfree buf=%jdMB\n", (intmax_t)size / (1024 * 1024));
+	hprintf("bulkfree buffer %jdMB\n", (intmax_t)size / (1024 * 1024));
 
 	/*
 	 * Normalize start point to a 1GB boundary.  We operate on a
@@ -954,7 +950,7 @@ h2_bulkfree_sync(hammer2_bulkfree_info_t *cbinfo)
 			live_chain = NULL;
 			goto next;
 		}
-		//live_chain->bref.check.freemap.bigmask = -1; /* XXX avoid modify */
+		live_chain->bref.check.freemap.bigmask = -1;
 		cbinfo->hmp->freemap_relaxed = 0; /* reset heuristic */
 		live = &live_chain->data->bmdata[bmapindex];
 
@@ -1018,7 +1014,6 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 					    "m=00/l=01\n");
 					break;
 				case 2:	/* 10 -> 00 */
-					/* XXX avoid modify
 					live->bitmapq[bindex] &=
 					    ~((hammer2_bitmap_t)2 << scount);
 					live->avail +=
@@ -1027,7 +1022,6 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 					    HAMMER2_FREEMAP_LEVEL0_SIZE)
 						live->avail =
 						    HAMMER2_FREEMAP_LEVEL0_SIZE;
-					*/
 					cbinfo->adj_free +=
 					    HAMMER2_FREEMAP_BLOCK_SIZE;
 					++cbinfo->count_10_00;
@@ -1036,10 +1030,8 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 					    HAMMER2_FREEMAP_BLOCK_SIZE);
 					break;
 				case 3:	/* 11 -> 10 */
-					/* XXX avoid modify
 					live->bitmapq[bindex] &=
 					    ~((hammer2_bitmap_t)1 << scount);
-					*/
 					++cbinfo->count_11_10;
 					hammer2_io_dedup_delete(cbinfo->hmp,
 					    HAMMER2_BREF_TYPE_DATA,
@@ -1071,12 +1063,10 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 					++cbinfo->count_00_11;
 					cbinfo->adj_free -=
 					    HAMMER2_FREEMAP_BLOCK_SIZE;
-					/* XXX avoid modify
 					live->avail -=
 					    HAMMER2_FREEMAP_BLOCK_SIZE;
 					if ((int32_t)live->avail < 0)
 						live->avail = 0;
-					*/
 					break;
 				case 1:	/* 01 */
 					++cbinfo->count_01_11;
@@ -1087,10 +1077,8 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 				case 3:	/* 11 */
 					break;
 				}
-				/* XXX avoid modify
 				live->bitmapq[bindex] |=
 				    ((hammer2_bitmap_t)3 << scount);
-				*/
 			}
 			mmask >>= 2;
 			lmask >>= 2;
@@ -1109,11 +1097,9 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 
 	if (bindex < 0) {
 		/* Completely empty, reset entire segment. */
-		/* XXX avoid modify
 		live->avail = HAMMER2_FREEMAP_LEVEL0_SIZE;
 		live->class = 0;
 		live->linear = 0;
-		*/
 		++cbinfo->count_l0cleans;
 	} else if (bindex < 7) {
 		/*
@@ -1137,7 +1123,7 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 			 * If greater than but still within the same
 			 * sub-block as live we can adjust linear upward.
 			 */
-			//live->linear = bmap->linear; /* XXX avoid modify */
+			live->linear = bmap->linear;
 			++cbinfo->count_linadjusts;
 		} else {
 			/*
@@ -1147,16 +1133,14 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 			 * assumptions with regards to available fragmentary
 			 * allocations.
 			 */
-			/* XXX avoid modify
 			live->linear =
 			    (bmap->linear + HAMMER2_FREEMAP_BLOCK_MASK) &
 			    ~HAMMER2_FREEMAP_BLOCK_MASK;
-			*/
 			++cbinfo->count_linadjusts;
 		}
 	} else {
 		/* Completely full, effectively disable the linear iterator. */
-		//live->linear = HAMMER2_SEGSIZE; /* XXX avoid modify */
+		live->linear = HAMMER2_SEGSIZE;
 	}
 }
 

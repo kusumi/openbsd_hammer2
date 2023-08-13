@@ -769,7 +769,7 @@ hammer2_init_volumes(const hammer2_devvp_list_t *devvpl,
 			KKASSERT(*rootvoldevvp == NULL);
 			*rootvoldevvp = devvp;
 		}
-		debug_hprintf("\"%s\" zone=%d id=%d offset=%016jx size=%016jx\n",
+		debug_hprintf("\"%s\" zone %d id %d offset %016jx size %016jx\n",
 		    path, zone, vol->id, (intmax_t)vol->offset,
 		    (intmax_t)vol->size);
 	}

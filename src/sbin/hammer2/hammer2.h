@@ -91,6 +91,8 @@ extern size_t MemOpt;
  */
 int cmd_pfs_getid(const char *sel_path, const char *name, int privateid);
 int cmd_pfs_list(int ac, char **av);
+int cmd_hash(int ac, const char **av);
+int cmd_dhash(int ac, const char **av);
 int cmd_info(int ac, const char **av);
 int cmd_mountall(int ac, const char **av);
 int cmd_stat(int ac, const char **av);

@@ -920,6 +920,35 @@ count_blocks(hammer2_bmap_data_t *bmap, int value,
 }
 
 int
+cmd_hash(int ac, const char **av)
+{
+	int i;
+
+	for (i = 0; i < ac; ++i) {
+		printf("%016jx %s\n",
+		       dirhash(av[i], strlen(av[i])),
+		       av[i]);
+	}
+	return(0);
+}
+
+int
+cmd_dhash(int ac, const char **av)
+{
+	char buf[1024];		/* 1K extended directory record */
+	uint64_t hash;
+	int i;
+
+	for (i = 0; i < ac; ++i) {
+		bzero(buf, sizeof(buf));
+		snprintf(buf, sizeof(buf), "%s", av[i]);
+		hash = XXH64(buf, sizeof(buf), XXH_HAMMER2_SEED);
+		printf("%016jx %s\n", hash, av[i]);
+	}
+	return(0);
+}
+
+int
 cmd_dumpchain(const char *path, u_int flags)
 {
 	int dummy = (int)flags;

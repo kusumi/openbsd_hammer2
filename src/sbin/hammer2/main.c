@@ -139,6 +139,10 @@ main(int ac, char **av)
 	} else if (strcmp(av[0], "growfs") == 0) {
 		ecode = cmd_growfs(sel_path, ac - 1,
 					 (const char **)(void *)&av[1]);
+	} else if (strcmp(av[0], "hash") == 0) {
+		ecode = cmd_hash(ac - 1, (const char **)(void *)&av[1]);
+	} else if (strcmp(av[0], "dhash") == 0) {
+		ecode = cmd_dhash(ac - 1, (const char **)(void *)&av[1]);
 	} else if (strcmp(av[0], "pfs-clid") == 0) {
 		/*
 		 * Print cluster id (uuid) for specific PFS
@@ -249,6 +253,10 @@ usage(int code)
 			"THIS IS A VERY DANGEROUS MODE\n"
 		"    emergency-mode-disable <target>   "
 			"Disable emergency operations mode on filesystem\n"
+		"    hash [<filename>...]              "
+			"Print directory hash (key) for name\n"
+		"    dhash [<filename>...]             "
+			"Print data hash for long directory entry\n"
 		"    pfs-list [<path>...]              "
 			"List PFSs\n"
 		"    pfs-clid <label>                  "
