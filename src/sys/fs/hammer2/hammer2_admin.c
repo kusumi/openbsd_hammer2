@@ -35,11 +35,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/malloc.h>
-#include <sys/queue.h>
-
 #include "hammer2.h"
 
 #define H2XOPDESCRIPTOR(label)					\
@@ -165,29 +160,15 @@ hammer2_xop_active(const hammer2_xop_head_t *xop)
 /*
  * hashinit(9) based hash to track inode dependencies.
  */
-static __inline int
-xop_ipdep_value(const hammer2_inode_t *ip)
-{
-	int idx;
-
-	rw_assert_wrlock(&ip->pmp->xop_lock);
-
-	KKASSERT(ip != NULL);
-	idx = ip->meta.inum % HAMMER2_IHASH_SIZE;
-	KKASSERT(idx >= 0 && idx < HAMMER2_IHASH_SIZE);
-
-	return (idx);
-}
-
 static int
-xop_testset_ipdep(hammer2_inode_t *ip)
+xop_testset_ipdep(hammer2_inode_t *ip, int idx)
 {
 	hammer2_ipdep_list_t *ipdep;
 	hammer2_inode_t *iptmp;
 
-	rw_assert_wrlock(&ip->pmp->xop_lock);
+	rw_assert_wrlock(&ip->pmp->xop_lock[idx]);
 
-	ipdep = &ip->pmp->ipdep_lists[xop_ipdep_value(ip)];
+	ipdep = &ip->pmp->ipdep_lists[idx];
 	LIST_FOREACH(iptmp, ipdep, ientry)
 		if (iptmp == ip)
 			return (1); /* collision */
@@ -197,14 +178,14 @@ xop_testset_ipdep(hammer2_inode_t *ip)
 }
 
 static void
-xop_unset_ipdep(hammer2_inode_t *ip)
+xop_unset_ipdep(hammer2_inode_t *ip, int idx)
 {
 	hammer2_ipdep_list_t *ipdep;
 	hammer2_inode_t *iptmp;
 
-	rw_assert_wrlock(&ip->pmp->xop_lock);
+	rw_assert_wrlock(&ip->pmp->xop_lock[idx]);
 
-	ipdep = &ip->pmp->ipdep_lists[xop_ipdep_value(ip)];
+	ipdep = &ip->pmp->ipdep_lists[idx];
 	LIST_FOREACH(iptmp, ipdep, ientry)
 		if (iptmp == ip) {
 			LIST_REMOVE(ip, ientry);
@@ -221,6 +202,8 @@ hammer2_xop_start(hammer2_xop_head_t *xop, hammer2_xop_desc_t *desc)
 {
 	hammer2_inode_t *ip = xop->ip1;
 	hammer2_pfs_t *pmp = ip->pmp;
+	struct rwlock *mtx;
+	char *cv;
 	uint32_t mask;
 	int i;
 
@@ -237,15 +220,16 @@ hammer2_xop_start(hammer2_xop_head_t *xop, hammer2_xop_desc_t *desc)
 	for (i = 0; i < ip->cluster.nchains; ++i) {
 		mask = 1LLU << i;
 		if (hammer2_xop_active(xop)) {
-			rw_enter_write(&pmp->xop_lock);
+			mtx = &pmp->xop_lock[ip->ipdep_idx];
+			cv = pmp->xop_cv[ip->ipdep_idx];
+			rw_enter_write(mtx);
 again:
-			if (xop_testset_ipdep(ip)) {
+			if (xop_testset_ipdep(ip, ip->ipdep_idx)) {
 				pmp->flags |= HAMMER2_PMPF_WAITING;
-				rwsleep(pmp->xop_cv, &pmp->xop_lock, PCATCH,
-				    pmp->xop_cv, 0);
+				rwsleep(cv, mtx, PCATCH, cv, 0);
 				goto again;
 			}
-			rw_exit_write(&pmp->xop_lock);
+			rw_exit_write(mtx);
 
 			xop->desc->storage_func((hammer2_xop_t *)xop, i);
 			hammer2_xop_retire(xop, mask);
@@ -264,8 +248,10 @@ hammer2_xop_retire(hammer2_xop_head_t *xop, uint32_t mask)
 {
 	hammer2_pfs_t *pmp;
 	hammer2_chain_t *chain;
+	hammer2_inode_t *ip;
+	struct rwlock *mtx;
+	char *cv;
 	hammer2_xop_fifo_t *fifo;
-
 	uint32_t omask;
 	int i;
 
@@ -307,17 +293,20 @@ hammer2_xop_retire(hammer2_xop_head_t *xop, uint32_t mask)
 	}
 
 	/* The inode is only held at this point, simply drop it. */
-	if (xop->ip1) {
-		pmp = xop->ip1->pmp;
-		rw_enter_write(&pmp->xop_lock);
-		xop_unset_ipdep(xop->ip1);
+	ip = xop->ip1;
+	if (ip) {
+		pmp = ip->pmp;
+		mtx = &pmp->xop_lock[ip->ipdep_idx];
+		cv = pmp->xop_cv[ip->ipdep_idx];
+		rw_enter_write(mtx);
+		xop_unset_ipdep(ip, ip->ipdep_idx);
 		if (pmp->flags & HAMMER2_PMPF_WAITING) {
 			pmp->flags &= ~HAMMER2_PMPF_WAITING;
-			wakeup(pmp->xop_cv);
+			wakeup(cv);
 		}
-		rw_exit_write(&pmp->xop_lock);
+		rw_exit_write(mtx);
 
-		hammer2_inode_drop(xop->ip1);
+		hammer2_inode_drop(ip);
 		xop->ip1 = NULL;
 	}
 

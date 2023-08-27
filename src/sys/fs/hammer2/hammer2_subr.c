@@ -35,13 +35,10 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/dirent.h>
-#include <sys/uuid.h>
-#include <sys/signalvar.h>
-
 #include "hammer2.h"
+
+#include <sys/dirent.h>
+#include <sys/signalvar.h>
 
 int
 hammer2_get_dtype(uint8_t type)

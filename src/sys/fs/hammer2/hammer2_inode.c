@@ -35,13 +35,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/lock.h>
-#include <sys/malloc.h>
-#include <sys/tree.h>
-#include <sys/vnode.h>
-
 #include "hammer2.h"
 
 static void hammer2_inode_repoint(hammer2_inode_t *, hammer2_cluster_t *);
@@ -62,27 +55,93 @@ RB_GENERATE_STATIC(hammer2_inode_tree, hammer2_inode, rbnode,
     hammer2_inode_cmp);
 
 /*
- * HAMMER2 offers shared and exclusive locks on inodes.
- * Pass a mask of flags for options:
+ * Lock an inode, with SYNCQ semantics.
+ *
+ * HAMMER2 offers shared and exclusive locks on inodes.  Pass a mask of
+ * flags for options:
+ *
  *	- pass HAMMER2_RESOLVE_SHARED if a shared lock is desired.
+ *	  shared locks are not subject to SYNCQ semantics, exclusive locks
+ *	  are.
+ *
  *	- pass HAMMER2_RESOLVE_ALWAYS if you need the inode's meta-data.
  *	  Most front-end inode locks do.
+ *
+ * This function, along with lock4, has SYNCQ semantics.  If the inode being
+ * locked is on the SYNCQ, that is it has been staged by the syncer, we must
+ * block until the operation is complete (even if we can lock the inode).  In
+ * order to reduce the stall time, we re-order the inode to the front of the
+ * pmp->syncq prior to blocking.  This reordering VERY significantly improves
+ * performance.
  */
 void
 hammer2_inode_lock(hammer2_inode_t *ip, int how)
 {
-	hammer2_inode_ref(ip);
+	hammer2_pfs_t *pmp;
 
-	if (how & HAMMER2_RESOLVE_SHARED)
+	hammer2_inode_ref(ip);
+	pmp = ip->pmp;
+
+	/* Inode structure mutex - Shared lock */
+	if (how & HAMMER2_RESOLVE_SHARED) {
 		hammer2_mtx_sh(&ip->lock);
-	else
-		hammer2_mtx_ex(&ip->lock);
+		return;
+	}
+
+	/*
+	 * Inode structure mutex - Exclusive lock
+	 *
+	 * An exclusive lock (if not recursive) must wait for inodes on
+	 * SYNCQ to flush first, to ensure that meta-data dependencies such
+	 * as the nlink count and related directory entries are not split
+	 * across flushes.
+	 *
+	 * If the vnode is locked by the current thread it must be unlocked
+	 * across the tsleep() to avoid a deadlock.
+	 */
+	hammer2_mtx_ex(&ip->lock);
+	/* XXX ip->lock isn't recursive to begin with.
+	if (hammer2_mtx_refs(&ip->lock) > 1)
+		return;
+	*/
+	while ((ip->flags & HAMMER2_INODE_SYNCQ) && pmp) {
+		hammer2_spin_ex(&pmp->list_spin);
+		if (ip->flags & HAMMER2_INODE_SYNCQ) {
+			KKASSERT(0); /* XXX vnode */
+			/*
+			tsleep_interlock(&ip->flags, 0);
+			atomic_set_int(&ip->flags, HAMMER2_INODE_SYNCQ_WAKEUP);
+			TAILQ_REMOVE(&pmp->syncq, ip, entry);
+			TAILQ_INSERT_HEAD(&pmp->syncq, ip, entry);
+			hammer2_spin_unex(&pmp->list_spin);
+			hammer2_mtx_unlock(&ip->lock);
+			tsleep(&ip->flags, PINTERLOCKED, "h2sync", 0);
+			hammer2_mtx_ex(&ip->lock);
+			continue;
+			*/
+		}
+		hammer2_spin_unex(&pmp->list_spin);
+		break;
+	}
 }
 
+/*
+ * Release an inode lock.  If another thread is blocked on SYNCQ_WAKEUP
+ * we wake them up.
+ */
 void
 hammer2_inode_unlock(hammer2_inode_t *ip)
 {
-	hammer2_mtx_unlock(&ip->lock);
+	if (ip->flags & HAMMER2_INODE_SYNCQ_WAKEUP) {
+		KKASSERT(0); /* XXX vnode */
+		/*
+		atomic_clear_int(&ip->flags, HAMMER2_INODE_SYNCQ_WAKEUP);
+		hammer2_mtx_unlock(&ip->lock);
+		wakeup(&ip->flags);
+		*/
+	} else {
+		hammer2_mtx_unlock(&ip->lock);
+	}
 	hammer2_inode_drop(ip);
 }
 
@@ -414,6 +473,10 @@ again:
 	}
 
 	nip->pmp = pmp;
+
+	/* Calculate ipdep index. */
+	nip->ipdep_idx = nip->meta.inum % HAMMER2_IHASH_SIZE;
+	KKASSERT(nip->ipdep_idx >= 0 && nip->ipdep_idx < HAMMER2_IHASH_SIZE);
 
 	/*
 	 * ref and lock on nip gives it state compatible to after a

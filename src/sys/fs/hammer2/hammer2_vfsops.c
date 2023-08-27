@@ -35,15 +35,11 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/kernel.h>
-#include <sys/systm.h>
-#include <sys/sysctl.h>
-#include <sys/rwlock.h>
-#include <sys/specdev.h>
-
 #include "hammer2.h"
 #include "hammer2_mount.h"
+
+#include <sys/sysctl.h>
+#include <sys/specdev.h>
 
 static int hammer2_unmount(struct mount *, int, struct proc *);
 static int hammer2_statfs(struct mount *, struct statfs *, struct proc *);
@@ -184,7 +180,7 @@ hammer2_pfsalloc(hammer2_chain_t *chain, const hammer2_inode_data_t *ripdata,
 {
 	hammer2_pfs_t *pmp = NULL;
 	hammer2_inode_t *iroot;
-	int j;
+	int i, j;
 
 	KASSERTMSG(force_local, "only local mount allowed");
 
@@ -216,8 +212,12 @@ hammer2_pfsalloc(hammer2_chain_t *chain, const hammer2_inode_data_t *ripdata,
 		hammer2_spin_init(&pmp->inum_spin, "h2pmp_inosp");
 		hammer2_spin_init(&pmp->lru_spin, "h2pmp_lrusp");
 		hammer2_spin_init(&pmp->list_spin, "h2pmp_lssp");
-		rw_init(&pmp->xop_lock, "h2pmp_xoplk");
-		pmp->xop_cv = kstrdup("h2pmp_xopcv");
+		for (i = 0; i < HAMMER2_IHASH_SIZE; i++) {
+			rw_init(&pmp->xop_lock[i], "h2pmp_xoplk");
+			pmp->xop_cv[i] = kstrdup("h2pmp_xopcv");
+			KKASSERT(i == 0 ||
+			    (pmp->xop_cv[i] != pmp->xop_cv[i-1]));
+		}
 		rw_init(&pmp->trans_lock, "h2pmp_trlk");
 		pmp->trans_cv = kstrdup("h2pmp_trcv");
 		RB_INIT(&pmp->inum_tree);
@@ -351,7 +351,8 @@ hammer2_pfsfree(hammer2_pfs_t *pmp)
 		hammer2_spin_destroy(&pmp->inum_spin);
 		hammer2_spin_destroy(&pmp->lru_spin);
 		hammer2_spin_destroy(&pmp->list_spin);
-		kstrfree(pmp->xop_cv);
+		for (i = 0; i < HAMMER2_IHASH_SIZE; i++)
+			kstrfree(pmp->xop_cv[i]);
 		kstrfree(pmp->trans_cv);
 		hashfree(pmp->ipdep_lists, HAMMER2_IHASH_SIZE, M_HAMMER2);
 		if (pmp->fspec)

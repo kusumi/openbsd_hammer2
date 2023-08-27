@@ -35,12 +35,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/buf.h>
-#include <sys/malloc.h>
-#include <sys/tree.h>
-
 #include "hammer2.h"
 
 #define HAMMER2_DOP_READ	1
@@ -115,7 +109,7 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off, uint8_t btype,
 	dio = RB_FIND(hammer2_io_tree, &hmp->iotree, &find);
 	if (dio) {
 		hammer2_mtx_ex(&dio->lock);
-		refs = atomic_fetchadd_32(&dio->refs, 1);
+		refs = dio->refs++;
 		if ((refs & HAMMER2_DIO_MASK) == 0)
 			atomic_add_int(&dio->hmp->iofree_count, -1);
 	} else if (createit) {
@@ -136,7 +130,7 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off, uint8_t btype,
 		if (xio == NULL) {
 			atomic_add_int(&hammer2_dio_allocs, 1);
 		} else {
-			refs = atomic_fetchadd_32(&xio->refs, 1);
+			refs = xio->refs++;
 			if ((refs & HAMMER2_DIO_MASK) == 0)
 				atomic_add_int(&xio->hmp->iofree_count, -1);
 			hammer2_mtx_unlock(&dio->lock);
@@ -454,8 +448,8 @@ hammer2_io_dedup_set(hammer2_dev_t *hmp, hammer2_blockref_t *bref)
 		lsize = 0;
 
 	mask = hammer2_dedup_mask(dio, bref->data_off, lsize);
-	atomic_clear_64(&dio->dedup_valid, mask);
-	atomic_set_64(&dio->dedup_alloc, mask);
+	dio->dedup_valid &= ~mask;
+	dio->dedup_alloc |= mask;
 
 	hammer2_mtx_unlock(&dio->lock);
 	hammer2_io_putblk(&dio);
@@ -493,8 +487,8 @@ hammer2_io_dedup_delete(hammer2_dev_t *hmp, uint8_t btype,
 			    data_off, bytes, dio->pbase);
 
 		mask = hammer2_dedup_mask(dio, data_off, bytes);
-		atomic_clear_64(&dio->dedup_alloc, mask);
-		atomic_clear_64(&dio->dedup_valid, mask);
+		dio->dedup_alloc &= ~mask;
+		dio->dedup_valid &= ~mask;
 
 		hammer2_mtx_unlock(&dio->lock);
 		hammer2_io_putblk(&dio);

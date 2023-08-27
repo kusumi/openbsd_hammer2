@@ -35,16 +35,13 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/fcntl.h>
-#include <sys/buf.h>
-#include <sys/dkio.h>
-#include <sys/disklabel.h>
-
 #include "hammer2.h"
 #include "hammer2_ioctl.h"
 #include "hammer2_mount.h"
+
+#include <sys/fcntl.h>
+#include <sys/dkio.h>
+#include <sys/disklabel.h>
 
 #if 0
 /*

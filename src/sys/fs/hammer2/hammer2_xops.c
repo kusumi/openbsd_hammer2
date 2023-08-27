@@ -35,9 +35,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-
 #include "hammer2.h"
 
 /*

@@ -69,9 +69,6 @@
 
 #define atomic_add_32		atomic_add_int
 
-#define atomic_set_64		atomic_setbits_64
-#define atomic_clear_64		atomic_clearbits_64
-
 #define atomic_cmpset_int(ptr, old, new)	\
 	(atomic_cas_uint((ptr), (old), (new)) == (old))
 
@@ -79,19 +76,6 @@
 
 #define atomic_cmpset_64(ptr, old, new)		\
 	(__sync_val_compare_and_swap((ptr), (old), (new)))
-
-/* XXX Not atomic, but mostly harmless with read-only support. */
-static __inline void
-atomic_setbits_64(volatile uint64_t *p, uint64_t v)
-{
-	*p |= v;
-}
-
-static __inline void
-atomic_clearbits_64(volatile uint64_t *p, uint64_t v)
-{
-	*p &= ~v;
-}
 
 static __inline unsigned int
 atomic_fetchadd_int(volatile unsigned int *p, unsigned int v)

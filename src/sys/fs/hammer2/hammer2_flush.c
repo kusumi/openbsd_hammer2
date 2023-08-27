@@ -35,10 +35,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/buf.h>
-
 #include "hammer2.h"
 
 #define HAMMER2_FLUSH_DEPTH_LIMIT	60 /* stack recursion limit */
@@ -81,7 +77,7 @@ static int hammer2_flush_recurse(hammer2_chain_t *, void *);
 /*
  * XXX trans_lock protects trans.flags.
  * DragonFly uses tsleep_interlock(9) here without taking mutex.
- * Free|Net|OpenBSD ultimately need to get rid of trans_lock.
+ * Other BSD's ultimately need to get rid of trans_lock.
  */
 void
 hammer2_trans_init(hammer2_pfs_t *pmp, uint32_t flags)

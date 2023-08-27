@@ -5,8 +5,6 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 + HAMMER2 file system for OpenBSD (currently read-only support)
 
-+ OpenBSD version of https://github.com/kusumi/netbsd_hammer2
-
 ## Requirements
 
 + OpenBSD 7.3
@@ -43,8 +41,14 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
         $ cd openbsd_hammer2
         $ make uninstall
 
+## Bugs
+
++ VOP_READDIR implementation is known to not work with some user space libraries on 32 bit platforms.
+
 ## Notes
 
 + Tags are merely for packaging, nothing directly to do with file system version.
 
 + [makefs](https://github.com/kusumi/makefs) supports HAMMER2 image creation from a directory contents.
+
++ This repository will be abandoned once Linux or FreeBSD is stabilized with write support. OpenBSD is not the main target.

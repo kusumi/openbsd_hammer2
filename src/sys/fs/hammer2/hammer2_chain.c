@@ -35,17 +35,11 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/malloc.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/proc.h>
-#include <crypto/sha2.h>
-
 #include "hammer2.h"
 #include "hammer2_mount.h"
 #include "hammer2_xxhash.h"
+
+#include <crypto/sha2.h>
 
 static hammer2_chain_t *hammer2_combined_find(hammer2_chain_t *,
     hammer2_blockref_t *, int, hammer2_key_t *, hammer2_key_t, hammer2_key_t,
@@ -847,7 +841,10 @@ hammer2_chain_drop_data(hammer2_chain_t *chain)
  *			   (typically used to avoid device/logical buffer
  *			    aliasing for data)
  *
- * HAMMER2_RESOLVE_MAYBE - Do not resolve data elements for DATA chains.
+ * HAMMER2_RESOLVE_MAYBE - Do not resolve data elements for chains in
+ *			   the INITIAL-create state (indirect blocks only).
+ *
+ *			   Do not resolve data elements for DATA chains.
  *			   (typically used to avoid device/logical buffer
  *			    aliasing for data)
  *
@@ -855,6 +852,9 @@ hammer2_chain_drop_data(hammer2_chain_t *chain)
  *
  * HAMMER2_RESOLVE_SHARED- (flag) The chain is locked shared, otherwise
  *			   it will be locked exclusive.
+ *
+ * HAMMER2_RESOLVE_NONBLOCK- (flag) The chain is locked non-blocking.
+ *			   If the lock fails, EAGAIN is returned.
  *
  * NOTE: Embedded elements (volume header, inodes) are always resolved
  *	 regardless.
@@ -868,7 +868,8 @@ hammer2_chain_drop_data(hammer2_chain_t *chain)
  *	 a logical file buffer.  However, if ALWAYS is specified the
  *	 device buffer will be instantiated anyway.
  *
- * NOTE: The return value is currently always 0.
+ * NOTE: The return value is always 0 unless NONBLOCK is specified, in which
+ *	 case it can be either 0 or EAGAIN.
  *
  * WARNING! This function blocks on I/O if data needs to be fetched.  This
  *	    blocking can run concurrent with other compatible lock holders
@@ -879,29 +880,66 @@ hammer2_chain_lock(hammer2_chain_t *chain, int how)
 {
 	KKASSERT(chain->refs > 0);
 
-	/*
-	 * Get the appropriate lock.  If LOCKAGAIN is flagged with
-	 * SHARED the caller expects a shared lock to already be
-	 * present and we are giving it another ref.  This case must
-	 * importantly not block if there is a pending exclusive lock
-	 * request.
-	 */
-	atomic_add_int(&chain->lockcnt, 1);
-	if (how & HAMMER2_RESOLVE_SHARED) {
-		if (how & HAMMER2_RESOLVE_LOCKAGAIN) {
-			/*
-			 * rwlock(9) says "Callers must not recursively acquire
-			 * read locks", but it's been tested during mount.
-			 */
-			hammer2_mtx_assert_locked(&chain->lock);
-			hammer2_mtx_assert_sh(&chain->lock);
-			hammer2_mtx_sh(&chain->lock); /* XXX */
-			hammer2_mtx_assert_sh(&chain->lock);
+	if (how & HAMMER2_RESOLVE_NONBLOCK) {
+		/*
+		 * We still have to bump lockcnt before acquiring the lock,
+		 * even for non-blocking operation, because the unlock code
+		 * live-loops on lockcnt == 1 when dropping the last lock.
+		 *
+		 * If the non-blocking operation fails we have to use an
+		 * unhold sequence to undo the mess.
+		 *
+		 * NOTE: LOCKAGAIN must always succeed without blocking,
+		 *	 even if NONBLOCK is specified.
+		 */
+		atomic_add_int(&chain->lockcnt, 1);
+		if (how & HAMMER2_RESOLVE_SHARED) {
+			if (how & HAMMER2_RESOLVE_LOCKAGAIN) {
+				/*
+				 * rwlock(9) says "Callers must not recursively acquire
+				 * read locks", but it's been tested during mount.
+				 */
+				hammer2_mtx_assert_locked(&chain->lock);
+				hammer2_mtx_assert_sh(&chain->lock);
+				hammer2_mtx_sh(&chain->lock); /* XXX */
+				hammer2_mtx_assert_sh(&chain->lock);
+			} else {
+				if (hammer2_mtx_sh_try(&chain->lock) != 0) {
+					hammer2_chain_unhold(chain);
+					return (EAGAIN);
+				}
+			}
 		} else {
-			hammer2_mtx_sh(&chain->lock);
+			if (hammer2_mtx_ex_try(&chain->lock) != 0) {
+				hammer2_chain_unhold(chain);
+				return (EAGAIN);
+			}
 		}
 	} else {
-		hammer2_mtx_ex(&chain->lock);
+		/*
+		 * Get the appropriate lock.  If LOCKAGAIN is flagged with
+		 * SHARED the caller expects a shared lock to already be
+		 * present and we are giving it another ref.  This case must
+		 * importantly not block if there is a pending exclusive lock
+		 * request.
+		 */
+		atomic_add_int(&chain->lockcnt, 1);
+		if (how & HAMMER2_RESOLVE_SHARED) {
+			if (how & HAMMER2_RESOLVE_LOCKAGAIN) {
+				/*
+				 * rwlock(9) says "Callers must not recursively acquire
+				 * read locks", but it's been tested during mount.
+				 */
+				hammer2_mtx_assert_locked(&chain->lock);
+				hammer2_mtx_assert_sh(&chain->lock);
+				hammer2_mtx_sh(&chain->lock); /* XXX */
+				hammer2_mtx_assert_sh(&chain->lock);
+			} else {
+				hammer2_mtx_sh(&chain->lock);
+			}
+		} else {
+			hammer2_mtx_ex(&chain->lock);
+		}
 	}
 
 	/*
@@ -1790,6 +1828,7 @@ static hammer2_chain_t *
 hammer2_chain_repparent(hammer2_chain_t **chainp, int flags)
 {
 	hammer2_chain_t *chain, *parent;
+	hammer2_reptrack_t reptrack, **repp;
 
 	chain = *chainp;
 	hammer2_mtx_assert_locked(&chain->lock);
@@ -1798,15 +1837,120 @@ hammer2_chain_repparent(hammer2_chain_t **chainp, int flags)
 	KKASSERT(parent);
 
 	hammer2_chain_ref(parent);
-	/* DragonFly uses flags|HAMMER2_RESOLVE_NONBLOCK followed by reptrack */
-	hammer2_chain_lock(parent, flags);
+	if (hammer2_chain_lock(parent, flags|HAMMER2_RESOLVE_NONBLOCK) == 0) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+		*chainp = parent;
+		return (parent);
+	}
+
+	/*
+	 * Ok, now it gets a bit nasty.  There are multiple situations where
+	 * the parent might be in the middle of a deletion, or where the child
+	 * (chain) might be deleted the instant we let go of its lock.
+	 * We can potentially end up in a no-win situation!
+	 *
+	 * In particular, the indirect_maintenance() case can cause these
+	 * situations.
+	 *
+	 * To deal with this we install a reptrack structure in the parent
+	 * This reptrack structure 'owns' the parent ref and will automatically
+	 * migrate to the parent's parent if the parent is deleted permanently.
+	 */
+	hammer2_spin_init(&reptrack.spin, "h2reptrk");
+	reptrack.chain = parent;
+	hammer2_chain_ref(parent); /* for the reptrack */
+
+	hammer2_spin_ex(&parent->core.spin);
+	reptrack.next = parent->core.reptrack;
+	parent->core.reptrack = &reptrack;
+	hammer2_spin_unex(&parent->core.spin);
 
 	hammer2_chain_unlock(chain);
 	hammer2_chain_drop(chain);
-	*chainp = parent;
+	chain = NULL;
+
+	/*
+	 * At the top of this loop, chain is gone and parent is refd both
+	 * by us explicitly AND via our reptrack.  We are attempting to
+	 * lock parent.
+	 */
+	for (;;) {
+		hammer2_chain_lock(parent, flags);
+
+		if (reptrack.chain == parent)
+			break;
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+
+		hammer2_spin_ex(&reptrack.spin);
+		parent = reptrack.chain;
+		hammer2_chain_ref(parent);
+		hammer2_spin_unex(&reptrack.spin);
+	}
+
+	/*
+	 * Once parent is locked and matches our reptrack, our reptrack
+	 * will be stable and we have our parent.  We can unlink our reptrack.
+	 *
+	 * WARNING!  Remember that the chain lock might be shared.
+	 *	     Chains locked shared have stable parent linkages.
+	 */
+	hammer2_spin_ex(&parent->core.spin);
+	repp = &parent->core.reptrack;
+	while (*repp != &reptrack)
+		repp = &(*repp)->next;
+	*repp = reptrack.next;
+	hammer2_spin_unex(&parent->core.spin);
+
+	hammer2_chain_drop(parent); /* reptrack ref */
+	*chainp = parent; /* return parent lock+ref */
 
 	return (parent);
 }
+
+#if 0
+/*
+ * Dispose of any linked reptrack structures in (chain) by shifting them to
+ * (parent).  Both (chain) and (parent) must be exclusively locked.
+ *
+ * This is interlocked against any children of (chain) on the other side.
+ * No children so remain as-of when this is called so we can test
+ * core.reptrack without holding the spin-lock.
+ *
+ * Used whenever the caller intends to permanently delete chains related
+ * to topological recursions (BREF_TYPE_INDIRECT, BREF_TYPE_FREEMAP_NODE),
+ * where the chains underneath the node being deleted are given a new parent
+ * above the node being deleted.
+ */
+static void
+hammer2_chain_repchange(hammer2_chain_t *parent, hammer2_chain_t *chain)
+{
+	hammer2_reptrack_t *reptrack;
+
+	KKASSERT(chain->core.live_count == 0 && RB_EMPTY(&chain->core.rbtree));
+	while (chain->core.reptrack) {
+		hammer2_spin_ex(&parent->core.spin);
+		hammer2_spin_ex(&chain->core.spin);
+		reptrack = chain->core.reptrack;
+		if (reptrack == NULL) {
+			hammer2_spin_unex(&chain->core.spin);
+			hammer2_spin_unex(&parent->core.spin);
+			break;
+		}
+		hammer2_spin_ex(&reptrack->spin);
+		chain->core.reptrack = reptrack->next;
+		reptrack->chain = parent;
+		reptrack->next = parent->core.reptrack;
+		parent->core.reptrack = reptrack;
+		hammer2_chain_ref(parent); /* reptrack */
+
+		hammer2_spin_unex(&chain->core.spin);
+		hammer2_spin_unex(&parent->core.spin);
+		hammer2_chain_drop(chain); /* reptrack */
+	}
+}
+#endif
 
 /*
  * Locate the first chain whos key range overlaps (key_beg, key_end) inclusive.

@@ -50,6 +50,12 @@
  * implement its own buffer cache layer on top of the system layer to
  * allow for different threads to lock different sub-block-sized buffers.
  *
+ * When modifications are made to a chain a new filesystem block must be
+ * allocated.  Multiple modifications do not typically allocate new blocks
+ * until the current block has been flushed.  Flushes do not block the
+ * front-end unless the front-end operation crosses the current inode being
+ * flushed.
+ *
  * The in-memory representation may remain cached even after the related
  * data has been detached.
  */
@@ -59,20 +65,20 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/buf.h>
-#include <sys/errno.h>
 #include <sys/kernel.h>
-#include <sys/malloc.h>
-#include <sys/pool.h>
-#include <sys/mount.h>
+#include <sys/errno.h>
 #include <sys/proc.h>
-#include <sys/queue.h>
-#include <sys/rwlock.h>
-#include <sys/tree.h>
-#include <sys/uuid.h>
-#include <sys/vnode.h>
-#include <sys/atomic.h>
+#include <sys/pool.h>
+#include <sys/malloc.h>
+#include <sys/buf.h>
 #include <sys/namei.h>
+#include <sys/mount.h>
+#include <sys/vnode.h>
+#include <sys/queue.h>
+#include <sys/tree.h>
+#include <sys/rwlock.h>
+#include <sys/uuid.h>
+#include <sys/atomic.h>
 
 #include "hammer2_compat.h"
 #include "hammer2_disk.h"
@@ -206,6 +212,9 @@ typedef struct hammer2_inoq_head hammer2_inoq_head_t;
  * HAMMER2 uses an I/O abstraction that allows it to cache and manipulate
  * fixed-sized filesystem buffers frontend by variable-sized hammer2_chain
  * structures.
+ *
+ * Note that DragonFly uses atomic + interlock for refs, atomic for
+ * dedup_xxx, whereas other BSD's protect them with dio lock.
  */
 struct hammer2_io {
 	RB_ENTRY(hammer2_io)	rbnode;		/* indexed by device offset */
@@ -213,7 +222,7 @@ struct hammer2_io {
 	hammer2_dev_t		*hmp;
 	struct vnode		*devvp;
 	struct buf		*bp;
-	unsigned int		refs;
+	uint32_t		refs;
 	off_t			dbase;		/* offset of devvp within volumes */
 	off_t			pbase;
 	int			psize;
@@ -234,10 +243,19 @@ struct hammer2_io {
  * root (volume) down.  Chains represent volumes, inodes, indirect blocks,
  * data blocks, and freemap nodes and leafs.
  */
+struct hammer2_reptrack {
+	struct hammer2_reptrack	*next;
+	hammer2_chain_t		*chain;
+	hammer2_spin_t		spin;
+};
+
+typedef struct hammer2_reptrack hammer2_reptrack_t;
+
 /*
  * Core topology for chain (embedded in chain).  Protected by a spinlock.
  */
 struct hammer2_chain_core {
+	hammer2_reptrack_t	*reptrack;
 	hammer2_chain_tree_t	rbtree;		/* sub-chains */
 	hammer2_spin_t		spin;
 	int			live_zero;	/* blockref array opt */
@@ -281,8 +299,22 @@ struct hammer2_chain {
 /*
  * Special notes on flags:
  *
+ * INITIAL	- This flag allows a chain to be created and for storage to
+ *		  be allocated without having to immediately instantiate the
+ *		  related buffer.  The data is assumed to be all-zeros.  It
+ *		  is primarily used for indirect blocks.
+ *
  * MODIFIED	- The chain's media data has been modified.  Prevents chain
- *		  free on lastdrop if still in the topology
+ *		  free on lastdrop if still in the topology.
+ *
+ * UPDATE	- Chain might not be modified but parent blocktable needs
+ *		  an update.  Prevents chain free on lastdrop if still in
+ *		  the topology.
+ *
+ * BLKMAPPED	- Indicates that the chain is present in the parent blockmap.
+ *
+ * BLKMAPUPD	- Indicates that the chain is present but needs to be updated
+ *		  in the parent blockmap.
  */
 #define HAMMER2_CHAIN_MODIFIED		0x00000001	/* dirty chain data */
 #define HAMMER2_CHAIN_ALLOCATED		0x00000002	/* kmalloc'd chain */
@@ -345,17 +377,22 @@ struct hammer2_chain {
  * NOTES:
  *	NODATA	    - Asks that the chain->data not be resolved in order
  *		      to avoid I/O.
+ *
  *	NODIRECT    - Prevents a lookup of offset 0 in an inode from returning
  *		      the inode itself if the inode is in DIRECTDATA mode
  *		      (i.e. file is <= 512 bytes).  Used by the synchronization
  *		      code to prevent confusion.
+ *
  *	SHARED	    - The input chain is expected to be locked shared,
  *		      and the output chain is locked shared.
+ *
  *	MATCHIND    - Allows an indirect block / freemap node to be returned
  *		      when the passed key range matches the radix.  Remember
  *		      that key_end is inclusive (e.g. {0x000,0xFFF},
  *		      not {0x000,0x1000}).
+ *
  *		      (Cannot be used for remote or cluster ops).
+ *
  *	ALWAYS	    - Always resolve the data.  If ALWAYS and NODATA are both
  *		      missing, bulk file data is not resolved but inodes and
  *		      other meta-data will.
@@ -376,6 +413,10 @@ struct hammer2_chain {
 
 /*
  * Flags passed to hammer2_chain_lock().
+ *
+ * NOTE: NONBLOCK is only used for hammer2_chain_repparent() and getparent(),
+ *	 other functions (e.g. hammer2_chain_lookup(), etc) can't handle its
+ *	 operation.
  */
 #define HAMMER2_RESOLVE_NEVER		1
 #define HAMMER2_RESOLVE_MAYBE		2
@@ -384,6 +425,7 @@ struct hammer2_chain {
 
 #define HAMMER2_RESOLVE_SHARED		0x10	/* request shared lock */
 #define HAMMER2_RESOLVE_LOCKAGAIN	0x20	/* another shared lock */
+#define HAMMER2_RESOLVE_NONBLOCK	0x80	/* non-blocking */
 
 /*
  * Flags passed to hammer2_chain_delete().
@@ -453,8 +495,42 @@ struct hammer2_inode {
 	struct vnode		*vp;
 	unsigned int		refs;		/* +vpref, +flushref */
 	unsigned int		flags;		/* for HAMMER2_INODE_xxx */
+	int			ipdep_idx;
 };
 
+/*
+ * MODIFIED	- Inode is in a modified state, ip->meta may have changes.
+ * RESIZED	- Inode truncated (any) or inode extended beyond
+ *		  EMBEDDED_BYTES.
+ *
+ * SYNCQ	- Inode is included in the current filesystem sync.  The
+ *		  DELETING and CREATING flags will be acted upon.
+ *
+ * SIDEQ	- Inode has likely been disconnected from the vnode topology
+ *		  and so is not visible to the vnode-based filesystem syncer
+ *		  code, but is dirty and must be included in the next
+ *		  filesystem sync.  These inodes are moved to the SYNCQ at
+ *		  the time the sync occurs.
+ *
+ *		  Inodes are not placed on this queue simply because they have
+ *		  become dirty, if a vnode is attached.
+ *
+ * DELETING	- Inode is flagged for deletion during the next filesystem
+ *		  sync.  That is, the inode's chain is currently connected
+ *		  and must be deleting during the current or next fs sync.
+ *
+ * CREATING	- Inode is flagged for creation during the next filesystem
+ *		  sync.  That is, the inode's chain topology exists (so
+ *		  kernel buffer flushes can occur), but is currently
+ *		  disconnected and must be inserted during the current or
+ *		  next fs sync.  If the DELETING flag is also set, the
+ *		  topology can be thrown away instead.
+ *
+ * If an inode that is already part of the current filesystem sync is
+ * modified by the frontend, including by buffer flushes, the inode lock
+ * code detects the SYNCQ flag and moves the inode to the head of the
+ * flush-in-progress, then blocks until the flush has gotten past it.
+ */
 #define HAMMER2_INODE_MODIFIED		0x0001
 #define HAMMER2_INODE_ONRBTREE		0x0008
 #define HAMMER2_INODE_RESIZED		0x0010	/* requires inode_chain_sync */
@@ -695,6 +771,8 @@ typedef struct hammer2_iostat hammer2_iostat_t;
  * per-cluster-id, not per-block-device, and a single hard mount might contain
  * many PFSs.
  */
+#define HAMMER2_IHASH_SIZE	32
+
 struct hammer2_dev {
 	TAILQ_ENTRY(hammer2_dev) mntentry;	/* hammer2_mntlist */
 	hammer2_devvp_list_t	devvp_list;	/* list of device vnodes including *devvp */
@@ -744,8 +822,8 @@ struct hammer2_pfs {
 	hammer2_spin_t		inum_spin;	/* inumber lookup */
 	hammer2_spin_t		lru_spin;
 	hammer2_spin_t		list_spin;
-	struct rwlock		xop_lock;
-	char			*xop_cv;
+	struct rwlock		xop_lock[HAMMER2_IHASH_SIZE];
+	char			*xop_cv[HAMMER2_IHASH_SIZE];
 	struct rwlock		trans_lock;	/* XXX temporary */
 	char			*trans_cv;
 	struct mount		*mp;
@@ -773,8 +851,6 @@ struct hammer2_pfs {
 #define HAMMER2_PMPF_SPMP	0x00000001
 #define HAMMER2_PMPF_EMERG	0x00000002
 #define HAMMER2_PMPF_WAITING	0x10000000
-
-#define HAMMER2_IHASH_SIZE	16
 
 /*
  * NOTE: The LRU list contains at least all the chains with refs == 0

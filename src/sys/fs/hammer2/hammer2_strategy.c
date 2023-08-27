@@ -35,14 +35,11 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/buf.h>
-#include <lib/libz/zlib.h>
-
 #include "hammer2.h"
 #include "hammer2_lz4.h"
 #include "hammer2_xxhash.h"
+
+#include <lib/libz/zlib.h>
 
 static int hammer2_strategy_read(struct vop_strategy_args *);
 static void hammer2_strategy_read_completion(hammer2_chain_t *,
@@ -415,7 +412,7 @@ hammer2_dedup_record(hammer2_chain_t *chain, hammer2_io_t *dio,
 	 * be set before a bcmp/dedup operation is able to use the block.
 	 */
 	mask = hammer2_dedup_mask(dio, chain->bref.data_off, chain->bytes);
-	atomic_set_64(&dio->dedup_valid, mask);
+	dio->dedup_valid |= mask;
 }
 
 /*
