@@ -43,10 +43,10 @@
 #include <sys/dkio.h>
 #include <sys/disklabel.h>
 
-#if 0
 /*
  * Return 1 if read-only mounted otherwise 0.  DragonFly allows bwrite(9)
  * against a read-only mounted device, but FreeBSD does not.
+ * Align with FreeBSD behavior.
  */
 static int
 hammer2_is_rdonly(const struct mount *mp)
@@ -58,7 +58,6 @@ hammer2_is_rdonly(const struct mount *mp)
 
 	return (0);
 }
-#endif
 
 /*
  * Retrieve ondisk version.
@@ -270,6 +269,55 @@ hammer2_ioctl_inode_get(hammer2_inode_t *ip, void *data)
 }
 
 /*
+ * Set various parameters in an inode which cannot be set through
+ * normal filesystem VNOPS.
+ */
+static int
+hammer2_ioctl_inode_set(hammer2_inode_t *ip, void *data)
+{
+	hammer2_ioc_inode_t *ino = data;
+
+	if (hammer2_is_rdonly(ip->pmp->mp))
+		return (EROFS);
+
+	hammer2_trans_init(ip->pmp, 0);
+	hammer2_inode_lock(ip, 0);
+
+	if ((ino->flags & HAMMER2IOC_INODE_FLAG_CHECK) &&
+	    ip->meta.check_algo != ino->ip_data.meta.check_algo) {
+		hammer2_inode_modify(ip);
+		ip->meta.check_algo = ino->ip_data.meta.check_algo;
+	}
+	if ((ino->flags & HAMMER2IOC_INODE_FLAG_COMP) &&
+	    ip->meta.comp_algo != ino->ip_data.meta.comp_algo) {
+		hammer2_inode_modify(ip);
+		ip->meta.comp_algo = ino->ip_data.meta.comp_algo;
+	}
+
+	/* Ignore these flags for now... */
+	if ((ino->flags & HAMMER2IOC_INODE_FLAG_IQUOTA) &&
+	    ip->meta.inode_quota != ino->ip_data.meta.inode_quota) {
+		hammer2_inode_modify(ip);
+		ip->meta.inode_quota = ino->ip_data.meta.inode_quota;
+	}
+	if ((ino->flags & HAMMER2IOC_INODE_FLAG_DQUOTA) &&
+	    ip->meta.data_quota != ino->ip_data.meta.data_quota) {
+		hammer2_inode_modify(ip);
+		ip->meta.data_quota = ino->ip_data.meta.data_quota;
+	}
+	if ((ino->flags & HAMMER2IOC_INODE_FLAG_COPIES) &&
+	    ip->meta.ncopies != ino->ip_data.meta.ncopies) {
+		hammer2_inode_modify(ip);
+		ip->meta.ncopies = ino->ip_data.meta.ncopies;
+	}
+
+	hammer2_inode_unlock(ip);
+	hammer2_trans_done(ip->pmp, HAMMER2_TRANS_SIDEQ);
+
+	return (0);
+}
+
+/*
  * Recursively dump chains of a given inode.
  */
 static int
@@ -277,13 +325,13 @@ hammer2_ioctl_debug_dump(hammer2_inode_t *ip, unsigned int flags)
 {
 #ifdef INVARIANTS
 	hammer2_chain_t *chain;
-	int i, count = 100000;
+	int i;
 
 	for (i = 0; i < ip->cluster.nchains; ++i) {
 		chain = ip->cluster.array[i].chain;
 		if (chain) {
 			hprintf("cluster #%d\n", i);
-			hammer2_dump_chain(chain, 0, 0, &count, 'i', flags);
+			hammer2_dump_chain(chain, 0, 0, -1, 'i');
 		}
 	}
 
@@ -348,6 +396,9 @@ hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
 		return (EINVAL);
 	if (bfi == NULL)
 		return (EINVAL);
+
+	if (hammer2_is_rdonly(ip->pmp->mp))
+		return (EROFS);
 
 	/*
 	 * Bulkfree has to be serialized to guarantee at least one sync
@@ -431,6 +482,9 @@ hammer2_ioctl_growfs(hammer2_inode_t *ip, void *data)
 	hmp = ip->pmp->pfs_hmps[0];
 	if (hmp == NULL)
 		return (EINVAL);
+
+	if (hammer2_is_rdonly(ip->pmp->mp))
+		return (EROFS);
 
 	if (hmp->nvolumes > 1) {
 		hprintf("growfs currently unsupported with multiple volumes\n");
@@ -541,7 +595,7 @@ hammer2_ioctl_growfs(hammer2_inode_t *ip, void *data)
 	 * filesystem syncer do it, but this was a sensitive operation
 	 * so don't take any chances.
 	 */
-	hammer2_vfs_sync(ip->pmp->mp, MNT_WAIT);
+	hammer2_sync(ip->pmp->mp, MNT_WAIT, 0, NULL, NULL);
 
 	return (0);
 }
@@ -602,6 +656,9 @@ hammer2_ioctl_impl(hammer2_inode_t *ip, unsigned long com, void *data,
 		break;
 	case HAMMER2IOC_INODE_GET:
 		error = hammer2_ioctl_inode_get(ip, data);
+		break;
+	case HAMMER2IOC_INODE_SET:
+		error = hammer2_ioctl_inode_set(ip, data);
 		break;
 	case HAMMER2IOC_DEBUG_DUMP:
 		error = hammer2_ioctl_debug_dump(ip, *(unsigned int *)data);

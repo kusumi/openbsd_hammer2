@@ -55,6 +55,130 @@ RB_GENERATE_STATIC(hammer2_inode_tree, hammer2_inode, rbnode,
     hammer2_inode_cmp);
 
 /*
+ * Caller holds pmp->list_spin and the inode should be locked.  Merge ip
+ * with the specified depend.
+ *
+ * If the ip is on SYNCQ it stays there and (void *)-1 is returned, indicating
+ * that successive calls must ensure the ip is on a pass2 depend (or they are
+ * all SYNCQ).  If the passed-in depend is not NULL and not (void *)-1 then
+ * we can set pass2 on it and return.
+ *
+ * If the ip is not on SYNCQ it is merged with the passed-in depend, creating
+ * a self-depend if necessary, and depend->pass2 is set according
+ * to the PASS2 flag.  SIDEQ is set.
+ */
+static hammer2_depend_t *
+hammer2_inode_setdepend_locked(hammer2_inode_t *ip, hammer2_depend_t *depend)
+{
+	hammer2_pfs_t *pmp = ip->pmp;
+	hammer2_depend_t *dtmp;
+	hammer2_inode_t *iptmp;
+#ifdef INVARIANTS
+	int sanitychk = 0;
+#endif
+	/*
+	 * If ip is SYNCQ its entry is used for the syncq list and it will
+	 * no longer be associated with a dependency.  Merging this status
+	 * with a passed-in depend implies PASS2.
+	 */
+	if (ip->flags & HAMMER2_INODE_SYNCQ) {
+		if (depend == (void *)-1 || depend == NULL)
+			return ((void *)-1);
+		depend->pass2 = 1;
+		hammer2_trans_setflags(pmp, HAMMER2_TRANS_RESCAN);
+		return (depend);
+	}
+
+	/*
+	 * If ip is already SIDEQ, merge ip->depend into the passed-in depend.
+	 * If it is not, associate the ip with the passed-in depend, creating
+	 * a single-entry dependency using depend_static if necessary.
+	 *
+	 * NOTE: The use of ip->depend_static always requires that the
+	 *	 specific ip containing the structure is part of that
+	 *	 particular depend_static's dependency group.
+	 */
+	if (ip->flags & HAMMER2_INODE_SIDEQ) {
+		/*
+		 * Merge ip->depend with the passed-in depend.  If the
+		 * passed-in depend is not a special case, all ips associated
+		 * with ip->depend (including the original ip) must be moved
+		 * to the passed-in depend.
+		 */
+		if (depend == NULL) {
+			depend = ip->depend;
+		} else if (depend == (void *)-1) {
+			depend = ip->depend;
+			depend->pass2 = 1;
+		} else if (depend != ip->depend) {
+			dtmp = ip->depend;
+			while ((iptmp = TAILQ_FIRST(&dtmp->sideq)) != NULL) {
+#ifdef INVARIANTS
+				if (iptmp == ip)
+					sanitychk = 1;
+#endif
+				TAILQ_REMOVE(&dtmp->sideq, iptmp, qentry);
+				TAILQ_INSERT_TAIL(&depend->sideq, iptmp, qentry);
+				iptmp->depend = depend;
+			}
+			KKASSERT(sanitychk == 1);
+			depend->count += dtmp->count;
+			depend->pass2 |= dtmp->pass2;
+			TAILQ_REMOVE(&pmp->depq, dtmp, entry);
+			dtmp->count = 0;
+			dtmp->pass2 = 0;
+		}
+	} else {
+		/*
+		 * Add ip to the sideq, creating a self-dependency if
+		 * necessary.
+		 */
+		hammer2_inode_ref(ip);
+		atomic_set_int(&ip->flags, HAMMER2_INODE_SIDEQ);
+		if (depend == NULL) {
+			depend = &ip->depend_static;
+			TAILQ_INSERT_TAIL(&pmp->depq, depend, entry);
+		} else if (depend == (void *)-1) {
+			depend = &ip->depend_static;
+			depend->pass2 = 1;
+			TAILQ_INSERT_TAIL(&pmp->depq, depend, entry);
+		} /* else add ip to passed-in depend */
+		TAILQ_INSERT_TAIL(&depend->sideq, ip, qentry);
+		ip->depend = depend;
+		++depend->count;
+		++pmp->sideq_count;
+	}
+
+	if (ip->flags & HAMMER2_INODE_SYNCQ_PASS2)
+		depend->pass2 = 1;
+	if (depend->pass2)
+		hammer2_trans_setflags(pmp, HAMMER2_TRANS_RESCAN);
+
+	return (depend);
+}
+
+/*
+ * Put a solo inode on the SIDEQ (meaning that its dirty).
+ * This can also occur from inode_lock4() and inode_depend().
+ *
+ * Caller must pass-in a locked inode.
+ */
+void
+hammer2_inode_delayed_sideq(hammer2_inode_t *ip)
+{
+	hammer2_pfs_t *pmp = ip->pmp;
+
+	/* Optimize case to avoid pmp spinlock. */
+	if ((ip->flags & (HAMMER2_INODE_SYNCQ | HAMMER2_INODE_SIDEQ)) == 0) {
+		hammer2_spin_ex(&pmp->list_spin);
+		KKASSERT(ip->vp);
+		vref(ip->vp); /* XXX sync */
+		hammer2_inode_setdepend_locked(ip, NULL);
+		hammer2_spin_unex(&pmp->list_spin);
+	}
+}
+
+/*
  * Lock an inode, with SYNCQ semantics.
  *
  * HAMMER2 offers shared and exclusive locks on inodes.  Pass a mask of
@@ -486,6 +610,7 @@ again:
 	hammer2_mtx_init(&nip->lock, "h2ip_lk");
 	rrw_init_flags(&nip->vnlock, "h2vn_lk", RWL_DUPOK | RWL_IS_VNODE);
 	hammer2_mtx_ex(&nip->lock);
+	TAILQ_INIT(&nip->depend_static.sideq);
 
 	/*
 	 * Attempt to add the inode.  If it fails we raced another inode
@@ -653,6 +778,38 @@ hammer2_inode_inode_count(const hammer2_inode_t *ip)
 }
 
 /*
+ * Mark an inode as being modified, meaning that the caller will modify
+ * ip->meta.
+ *
+ * If a vnode is present we set the vnode dirty and the nominal filesystem
+ * sync will also handle synchronizing the inode meta-data.  Unless NOSIDEQ
+ * we must ensure that the inode is on pmp->sideq.
+ *
+ * NOTE: We must always queue the inode to the sideq.  This allows H2 to
+ *	 shortcut vsyncscan() and flush inodes and their related vnodes
+ *	 in a two stages.  H2 still calls vfsync() for each vnode.
+ *
+ * NOTE: No mtid (modify_tid) is passed into this routine.  The caller is
+ *	 only modifying the in-memory inode.  A modify_tid is synchronized
+ *	 later when the inode gets flushed.
+ *
+ * NOTE: As an exception to the general rule, the inode MAY be locked
+ *	 shared for this particular call.
+ */
+void
+hammer2_inode_modify(hammer2_inode_t *ip)
+{
+	atomic_set_int(&ip->flags, HAMMER2_INODE_MODIFIED);
+	/* XXX sync */
+	/*
+	if (ip->vp)
+		vsetisdirty(ip->vp);
+	*/
+	if (ip->pmp && (ip->flags & HAMMER2_INODE_NOSIDEQ) == 0)
+		hammer2_inode_delayed_sideq(ip);
+}
+
+/*
  * Synchronize the inode's frontend state with the chain state prior
  * to any explicit flush of the inode or any strategy write call.  This
  * does not flush the inode's chain or its sub-topology to media (higher
@@ -691,8 +848,8 @@ hammer2_inode_chain_sync(hammer2_inode_t *ip)
 		if (error == HAMMER2_ERROR_ENOENT)
 			error = 0;
 		if (error) {
-			hprintf("unable to fsync inode %ld\n",
-			    (long)ip->meta.inum);
+			hprintf("unable to fsync inode %016jx\n",
+			    (intmax_t)ip->meta.inum);
 			/* XXX return error somehow? */
 		}
 	}

@@ -40,6 +40,7 @@
 #define HAMMER2_DOP_READ	1
 #define HAMMER2_DOP_NEW		2
 #define HAMMER2_DOP_NEWNZ	3
+#define HAMMER2_DOP_READQ	4
 
 /*
  * Implements an abstraction layer for buffered device I/O.
@@ -79,12 +80,12 @@ hammer2_assert_io_refs(hammer2_io_t *dio)
  * Returns the locked DIO corresponding to the data|radix offset.
  */
 static hammer2_io_t *
-hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off, uint8_t btype,
+hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_off_t data_off, uint8_t btype,
     int createit)
 {
 	hammer2_volume_t *vol;
 	hammer2_io_t *dio, *xio, find;
-	hammer2_key_t lbase, pbase, pmask;
+	hammer2_off_t lbase, pbase, pmask;
 	uint64_t refs;
 	int lsize, psize;
 
@@ -101,7 +102,7 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off, uint8_t btype,
 
 	if (pbase == 0 || ((lbase + lsize - 1) & pmask) != pbase)
 		hpanic("illegal base: %016jx %016jx+%08x / %016jx",
-		    pbase, lbase, lsize, pmask);
+		    (intmax_t)pbase, (intmax_t)lbase, lsize, (intmax_t)pmask);
 
 	/* Access or allocate dio, bump dio->refs to prevent destruction. */
 	bzero(&find, sizeof(find));
@@ -152,35 +153,97 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_key_t data_off, uint8_t btype,
 	return (dio);
 }
 
+static int
+hammer2_bread(hammer2_dev_t *hmp, hammer2_io_t *dio, daddr_t lblkno)
+{
+	int error;
+
+	error = bread(dio->devvp, lblkno, dio->psize, &dio->bp);
+	hammer2_inc_iostat(&hmp->iostat_read, dio->btype, dio->psize);
+
+	return (error);
+}
+
 /*
  * Acquire the requested dio.
  * If DIO_GOOD is set the buffer already exists and is good to go.
  */
 hammer2_io_t *
-hammer2_io_getblk(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize, int op)
+hammer2_io_getblk(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
+    int op)
 {
 	hammer2_io_t *dio;
 	daddr_t lblkno;
 	int error;
 
-	KKASSERT(op == HAMMER2_DOP_READ);
 	KKASSERT((1 << (int)(lbase & HAMMER2_OFF_MASK_RADIX)) == lsize);
 
 	hammer2_mtx_ex(&hmp->iotree_lock);
-	dio = hammer2_io_alloc(hmp, lbase, btype, 1);
+	if (op == HAMMER2_DOP_READQ) {
+		dio = hammer2_io_alloc(hmp, lbase, btype, 0);
+		if (dio == NULL)
+			return (NULL);
+		op = HAMMER2_DOP_READ;
+	} else {
+		dio = hammer2_io_alloc(hmp, lbase, btype, 1);
+	}
 	KKASSERT(dio);
 	hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
 	hammer2_mtx_unlock(&hmp->iotree_lock);
 
+	/* Buffer is already GOOD, handle the op and return. */
 	if (dio->refs & HAMMER2_DIO_GOOD) {
+		switch (op) {
+		case HAMMER2_DOP_NEW:
+			bzero(hammer2_io_data(dio, lbase), lsize);
+			/* fall through */
+		case HAMMER2_DOP_NEWNZ:
+			dio->refs |= HAMMER2_DIO_DIRTY;
+			break;
+		default:
+			break;
+		}
 		hammer2_mtx_unlock(&dio->lock);
 		return (dio);
 	}
 
+	/* GOOD is not set. */
 	KKASSERT(dio->bp == NULL);
+
+	error = 0;
 	lblkno = (dio->pbase - dio->dbase) / DEV_BSIZE;
-	error = bread(dio->devvp, lblkno, dio->psize, &dio->bp);
-	hammer2_inc_iostat(&hmp->iostat_read, dio->btype, dio->psize);
+
+	if (dio->pbase == (lbase & ~HAMMER2_OFF_MASK_RADIX) &&
+	    dio->psize == lsize) {
+		switch (op) {
+		case HAMMER2_DOP_NEW:
+		case HAMMER2_DOP_NEWNZ:
+			dio->bp = getblk(dio->devvp, lblkno, dio->psize, 0, 0);
+			if (op == HAMMER2_DOP_NEW)
+				bzero(dio->bp->b_data, dio->psize);
+			dio->refs |= HAMMER2_DIO_DIRTY;
+			break;
+		default:
+			error = hammer2_bread(hmp, dio, lblkno);
+			break;
+		}
+	} else {
+		error = hammer2_bread(hmp, dio, lblkno);
+		if (dio->bp) {
+			KKASSERT(error == 0);
+			switch (op) {
+			case HAMMER2_DOP_NEW:
+				bzero(hammer2_io_data(dio, lbase), lsize);
+				/* fall through */
+			case HAMMER2_DOP_NEWNZ:
+				dio->refs |= HAMMER2_DIO_DIRTY;
+				break;
+			default:
+				break;
+			}
+		}
+	}
+ 	//KKASSERT(error == 0 || dio->bp == NULL);
 
 	/* XXX
 	if (dio->bp)
@@ -332,7 +395,7 @@ hammer2_io_cleanup(hammer2_dev_t *hmp, hammer2_io_tree_t *tree)
 		    (dio->refs & HAMMER2_DIO_MASK) == 0);
 		if (dio->refs & HAMMER2_DIO_DIRTY)
 			hprintf("dirty buffer %016jx/%d\n",
-			    dio->pbase, dio->psize);
+			    (intmax_t)dio->pbase, dio->psize);
 
 		hammer2_mtx_destroy(&dio->lock);
 		free(dio, M_HAMMER2, 0);
@@ -342,7 +405,7 @@ hammer2_io_cleanup(hammer2_dev_t *hmp, hammer2_io_tree_t *tree)
 }
 
 char *
-hammer2_io_data(hammer2_io_t *dio, off_t lbase)
+hammer2_io_data(hammer2_io_t *dio, hammer2_off_t lbase)
 {
 	struct buf *bp;
 	off_t b_offset;
@@ -360,7 +423,7 @@ hammer2_io_data(hammer2_io_t *dio, off_t lbase)
 }
 
 int
-hammer2_io_new(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
+hammer2_io_new(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
     hammer2_io_t **diop)
 {
 	*diop = hammer2_io_getblk(hmp, btype, lbase, lsize, HAMMER2_DOP_NEW);
@@ -368,7 +431,7 @@ hammer2_io_new(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
 }
 
 int
-hammer2_io_newnz(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
+hammer2_io_newnz(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
     hammer2_io_t **diop)
 {
 	*diop = hammer2_io_getblk(hmp, btype, lbase, lsize, HAMMER2_DOP_NEWNZ);
@@ -376,7 +439,7 @@ hammer2_io_newnz(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
 }
 
 int
-hammer2_io_bread(hammer2_dev_t *hmp, int btype, off_t lbase, int lsize,
+hammer2_io_bread(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
     hammer2_io_t **diop)
 {
 	*diop = hammer2_io_getblk(hmp, btype, lbase, lsize, HAMMER2_DOP_READ);
@@ -484,7 +547,7 @@ hammer2_io_dedup_delete(hammer2_dev_t *hmp, uint8_t btype,
 		    (hammer2_off_t)bytes >
 		    (hammer2_off_t)dio->pbase + dio->psize)
 			hpanic("bad data_off %016jx/%d %016jx",
-			    data_off, bytes, dio->pbase);
+			    (intmax_t)data_off, bytes, (intmax_t)dio->pbase);
 
 		mask = hammer2_dedup_mask(dio, data_off, bytes);
 		dio->dedup_alloc &= ~mask;
@@ -515,9 +578,10 @@ hammer2_io_dedup_assert(hammer2_dev_t *hmp, hammer2_off_t data_off,
 
 		KASSERTMSG((dio->dedup_alloc &
 		    hammer2_dedup_mask(dio, data_off, bytes)) == 0,
-		    "%016jx/%d %016jx/%016jx", data_off, bytes,
-		    hammer2_dedup_mask(dio, data_off, bytes),
-		    dio->dedup_alloc);
+		    "%016jx/%d %016jx/%016jx",
+		    (intmax_t)data_off, bytes,
+		    (intmax_t)hammer2_dedup_mask(dio, data_off, bytes),
+		    (intmax_t)dio->dedup_alloc);
 
 		hammer2_mtx_unlock(&dio->lock);
 		hammer2_io_putblk(&dio);

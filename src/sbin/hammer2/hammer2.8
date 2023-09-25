@@ -30,7 +30,7 @@
 .\" OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd August 3, 2023
+.Dd September 18, 2023
 .Dt HAMMER2 8
 .Os
 .Sh NAME
@@ -142,6 +142,68 @@ Note that hammer2 volumes associated with storage devices which have not been
 mounted in any fashion will not be listed.
 At least one hammer2 label must be mounted for the volumes on that device to be
 visible.
+.\" ==== setcomp ====
+.It Cm setcomp Ar mode[:level] Ar path...
+Set the compression mode as specified for any newly created elements at or
+under the path if not overridden by deeper elements.
+Available modes are none, autozero, lz4, or zlib.
+When zlib is used the compression level can be set.
+The default will be 6 which is the best trade-off between performance and
+time.
+.Pp
+newfs_hammer2 will set the default compression to lz4 which prioritizes
+speed over performance.
+Also note that HAMMER2 contains a heuristic and will not attempt to
+compress every block if it detects a sufficient amount of uncompressable
+data.
+.Pp
+Hammer2 compression is only effective when it can reduce the size of dataset
+(typically a 64KB block) by one or more powers of 2.  A 64K block which
+only compresses to 40K will not yield any storage improvement.
+.Pp
+Generally speaking you do not want to set the compression mode to
+.Sq none ,
+as this will cause blocks of all-zeros to be written as all-zero blocks,
+instead of holes.
+The
+.Sq autozero
+compression mode detects blocks of all-zeros
+and writes them as holes.
+.\" ==== setcheck ====
+.It Cm setcheck Ar check Ar path...
+Set the check code as specified for any newly created elements at or under
+the path if not overridden by deeper elements.
+Available codes are default, disabled, crc32, xxhash64, or sha192.
+.Pp
+Normally HAMMER2 does not overwrite data blocks on the media in order to ensure
+snapshot integrity.
+Replacement data blocks will be reallocated.
+However, if the compression mode is set to
+.Sq none
+and the check code is set to
+.Sq disabled
+HAMMER2 will overwrite data on the media in-place.
+In this mode of operation,
+snapshots will not be able to snapshot the data against later changes
+made to the file, and de-duplication will no longer function on any
+data related to the file.
+However, you can still recover the most recent data from previously
+taken snapshots if you accidentally remove the file.
+.\" ==== clrcheck ====
+.It Cm clrcheck Op path...
+Clear the check code override for the specified paths.
+Overrides may still be present in deeper elements.
+.\" ==== setcrc32 ====
+.It Cm setcrc32 Op path...
+Set the check code to the ISCSI 32-bit CRC for any newly created elements
+at or under the path if not overridden by deeper elements.
+.\" ==== setxxhash64 ====
+.It Cm setxxhash64 Op path...
+Set the check code to XXHASH64, a fast 64-bit hash.
+.\" ==== setsha192 ====
+.It Cm setsha192 Op path...
+Set the check code to SHA192 for any newly created elements at or under
+the path if not overridden by deeper elements.
 .\" ==== bulkfree ====
 .It Cm bulkfree Ar path
 Run a bulkfree pass on a HAMMER2 mount.
@@ -156,6 +218,9 @@ option.
 .\" ==== printinode ====
 .It Cm printinode Ar path
 Dump inode.
+.\" ==== dumpchain ====
+.It Cm dumpchain Op path Op chnflags
+Dump in-memory chain topology.
 .Sh SEE ALSO
 .Xr mount_hammer2 8 ,
 .Xr newfs_hammer2 8

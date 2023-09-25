@@ -48,6 +48,7 @@
 
 int VerboseOpt;
 int QuietOpt;
+int RecurseOpt;
 size_t MemOpt;
 
 static void usage(int code);
@@ -63,7 +64,7 @@ main(int ac, char **av)
 	/*
 	 * Core options
 	 */
-	while ((ch = getopt(ac, av, "s:vq")) != -1) {
+	while ((ch = getopt(ac, av, "m:rs:vq")) != -1) {
 		switch(ch) {
 		case 'm':
 			MemOpt = strtoul(optarg, &opt, 0);
@@ -87,6 +88,9 @@ main(int ac, char **av)
 				usage(1);
 				break;
 			}
+			break;
+		case 'r':
+			RecurseOpt = 1;
 			break;
 		case 's':
 			sel_path = strdup(optarg);
@@ -215,6 +219,46 @@ main(int ac, char **av)
 		} else {
 			ecode = cmd_volume_list(1, &sel_path);
 		}
+	} else if (strcmp(av[0], "setcomp") == 0) {
+		if (ac < 3) {
+			/*
+			 * Missing compression method and at least one
+			 * path.
+			 */
+			fprintf(stderr,
+				"setcomp: requires compression method and "
+				"directory/file path\n");
+			usage(1);
+		} else {
+			/*
+			 * Multiple paths may be specified
+			 */
+			ecode = cmd_setcomp(av[1], &av[2]);
+		}
+	} else if (strcmp(av[0], "setcheck") == 0) {
+		if (ac < 3) {
+			/*
+			 * Missing compression method and at least one
+			 * path.
+			 */
+			fprintf(stderr,
+				"setcheck: requires check code method and "
+				"directory/file path\n");
+			usage(1);
+		} else {
+			/*
+			 * Multiple paths may be specified
+			 */
+			ecode = cmd_setcheck(av[1], &av[2]);
+		}
+	} else if (strcmp(av[0], "clrcheck") == 0) {
+		ecode = cmd_setcheck("none", &av[1]);
+	} else if (strcmp(av[0], "setcrc32") == 0) {
+		ecode = cmd_setcheck("crc32", &av[1]);
+	} else if (strcmp(av[0], "setxxhash64") == 0) {
+		ecode = cmd_setcheck("xxhash64", &av[1]);
+	} else if (strcmp(av[0], "setsha192") == 0) {
+		ecode = cmd_setcheck("sha192", &av[1]);
 	} else if (strcmp(av[0], "printinode") == 0) {
 		if (ac != 2) {
 			fprintf(stderr,
@@ -275,6 +319,18 @@ usage(int code)
 			"Raw hammer2 media dump for the volume header(s)\n"
 		"    volume-list [<path>...]           "
 			"List volumes\n"
+		"    setcomp <comp[:level]> <path>...  "
+			"Set comp algo {none, autozero, lz4, zlib} & level\n"
+		"    setcheck <check> <path>...        "
+			"Set check algo {none, crc32, xxhash64, sha192}\n"
+		"    clrcheck [<path>...]              "
+			"Clear check code override\n"
+		"    setcrc32 [<path>...]              "
+			"Set check algo to crc32\n"
+		"    setxxhash64 [<path>...]           "
+			"Set check algo to xxhash64\n"
+		"    setsha192 [<path>...]             "
+			"Set check algo to sha192\n"
 		"    bulkfree <path>                   "
 			"Run bulkfree pass\n"
 		"    printinode <path>                 "

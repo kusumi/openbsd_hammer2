@@ -577,9 +577,10 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 		 *	 further modifications to the buffer.  Chains with
 		 *	 embedded data don't need this.
 		 */
-		debug_hprintf("flush %p.%d %016jx/%d %016jx\n",
-		    chain, chain->bref.type, (uintmax_t)chain->bref.key,
-		    chain->bref.keybits, (uintmax_t)chain->bref.data_off);
+		debug_hprintf("flush %s chain %016jx %016jx/%d\n",
+		    hammer2_breftype_to_str(chain->bref.type),
+		    (intmax_t)chain->bref.data_off,
+		    (intmax_t)chain->bref.key, chain->bref.keybits);
 
 		/*
 		 * Update chain CRCs for flush.
@@ -598,7 +599,7 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 			KKASSERT(hmp->vchain.flags & HAMMER2_CHAIN_MODIFIED);
 			KKASSERT(chain == &hmp->fchain);
 			hmp->voldata.freemap_tid = chain->bref.mirror_tid;
-			debug_hprintf("sync freemap mirror_tid %08jx\n",
+			debug_hprintf("sync freemap mirror_tid %016jx\n",
 			    (intmax_t)chain->bref.mirror_tid);
 
 			/*
@@ -629,7 +630,7 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 			hammer2_chain_lock(&hmp->fchain,
 			    HAMMER2_RESOLVE_ALWAYS);
 			hammer2_voldata_lock(hmp);
-			debug_hprintf("sync volume mirror_tid %08jx\n",
+			debug_hprintf("sync volume mirror_tid %016jx\n",
 			    (intmax_t)chain->bref.mirror_tid);
 
 			/*
@@ -664,8 +665,8 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 			    HAMMER2_VOLUME_ICRCVH_OFF,
 			    HAMMER2_VOLUME_ICRCVH_SIZE);
 			debug_hprintf("sync volhdr %016jx %016jx\n",
-			    hmp->voldata.mirror_tid,
-			    hmp->vchain.bref.mirror_tid);
+			    (intmax_t)hmp->voldata.mirror_tid,
+			    (intmax_t)hmp->vchain.bref.mirror_tid);
 			hmp->volsync = hmp->voldata;
 			atomic_set_int(&chain->flags, HAMMER2_CHAIN_VOLUMESYNC);
 			hammer2_voldata_unlock(hmp);
@@ -773,13 +774,13 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 	    (flags & HAMMER2_FLUSH_FSSYNC) == 0 &&
 	    (flags & HAMMER2_FLUSH_ALL) == 0 &&
 	    chain->pmp && chain->pmp->mp) {
-		debug_hprintf("inum %ld do not update parent, non-fssync\n",
-		    (long)chain->bref.key);
+		debug_hprintf("inum %016jx do not update parent, non-fssync\n",
+		    (intmax_t)chain->bref.key);
 		goto skipupdate;
 	}
 	if (chain->bref.type == HAMMER2_BREF_TYPE_INODE)
-		debug_hprintf("inum %ld update parent\n",
-		    (long)chain->bref.key);
+		debug_hprintf("inum %016jx update parent\n",
+		    (intmax_t)chain->bref.key);
 
 	/*
 	 * The chain may need its blockrefs updated in the parent, normal
@@ -842,8 +843,9 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 		save_error = hammer2_chain_modify(parent, 0, 0, 0);
 		if (save_error) {
 			info->error |= save_error;
-			hprintf("%016jx.%02x error %08x\n",
-			    parent->bref.data_off, parent->bref.type,
+			hprintf("%s parent %016jx/%d error %08x\n",
+			    hammer2_breftype_to_str(parent->bref.type),
+			    (intmax_t)parent->bref.key, parent->bref.keybits,
 			    save_error);
 			atomic_set_int(&chain->flags, HAMMER2_CHAIN_UPDATE);
 			goto skipupdate;

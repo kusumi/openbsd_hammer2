@@ -84,6 +84,7 @@
 
 extern int VerboseOpt;
 extern int QuietOpt;
+extern int RecurseOpt;
 extern size_t MemOpt;
 
 /*
@@ -102,6 +103,8 @@ int cmd_emergency_mode(const char *sel_path, int enable, int ac,
 int cmd_growfs(const char *sel_path, int ac, const char **av);
 int cmd_show(const char *devpath, int which);
 int cmd_volume_list(int ac, char **av);
+int cmd_setcomp(const char *comp_str, char **paths);
+int cmd_setcheck(const char *comp_str, char **paths);
 int cmd_bulkfree(const char *dir_path);
 
 void print_inode(const char *path);

@@ -70,7 +70,7 @@ mount_hammer2_parseargs(int argc, char **argv,
 	int ch;
 
 	memset(args, 0, sizeof(*args));
-	*mntflags = MNT_RDONLY; /* currently write unsupported */
+	*mntflags = 0;
 	optind = optreset = 1; /* Reset for parse of new argv. */
 	while ((ch = getopt(argc, argv, "o:")) != -1) {
 		switch (ch) {

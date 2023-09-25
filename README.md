@@ -3,7 +3,7 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 ## About
 
-+ HAMMER2 file system for OpenBSD (currently read-only support)
++ HAMMER2 file system for OpenBSD
 
 ## Requirements
 
@@ -43,7 +43,7 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 ## Bugs
 
-+ VOP_READDIR implementation is known to not work with some user space libraries on 32 bit platforms.
++ VOP\_READDIR implementation is known to not work with some user space libraries on 32 bit platforms.
 
 ## Notes
 

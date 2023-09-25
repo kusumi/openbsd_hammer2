@@ -223,8 +223,8 @@ struct hammer2_io {
 	struct vnode		*devvp;
 	struct buf		*bp;
 	uint32_t		refs;
-	off_t			dbase;		/* offset of devvp within volumes */
-	off_t			pbase;
+	hammer2_off_t		dbase;		/* offset of devvp within volumes */
+	hammer2_off_t		pbase;
 	int			psize;
 	int			act;		/* activity */
 	int			btype;
@@ -259,6 +259,7 @@ struct hammer2_chain_core {
 	hammer2_chain_tree_t	rbtree;		/* sub-chains */
 	hammer2_spin_t		spin;
 	int			live_zero;	/* blockref array opt */
+	unsigned int		live_count;	/* live (not deleted) chains in tree */
 	unsigned int		chain_count;	/* live + deleted chains under core */
 	int			generation;	/* generation number (inserts only) */
 };
@@ -433,6 +434,13 @@ struct hammer2_chain {
 #define HAMMER2_DELETE_PERMANENT	0x0001
 
 /*
+ * Flags passed to hammer2_chain_insert() or hammer2_chain_rename()
+ * or hammer2_chain_create().
+ */
+#define HAMMER2_INSERT_PFSROOT		0x0004
+#define HAMMER2_INSERT_SAMEPARENT	0x0008
+
+/*
  * Flags passed to hammer2_freemap_adjust().
  */
 #define HAMMER2_FREEMAP_DORECOVER	1
@@ -485,6 +493,7 @@ struct hammer2_inode {
 	TAILQ_ENTRY(hammer2_inode) qentry;	/* SYNCQ/SIDEQ */
 	LIST_ENTRY(hammer2_inode) ientry;
 	hammer2_depend_t	*depend;	/* non-NULL if SIDEQ */
+	hammer2_depend_t	depend_static;	/* (in-place allocation) */
 	hammer2_mtx_t		lock;		/* inode lock */
 	struct rrwlock		vnlock;		/* vnode lock */
 	hammer2_spin_t		cluster_spin;	/* update cluster */
@@ -535,6 +544,7 @@ struct hammer2_inode {
 #define HAMMER2_INODE_ONRBTREE		0x0008
 #define HAMMER2_INODE_RESIZED		0x0010	/* requires inode_chain_sync */
 #define HAMMER2_INODE_SIDEQ		0x0100	/* on side processing queue */
+#define HAMMER2_INODE_NOSIDEQ		0x0200	/* disable sideq operation */
 #define HAMMER2_INODE_DIRTYDATA		0x0400	/* interlocks inode flush */
 #define HAMMER2_INODE_SYNCQ		0x0800	/* sync interlock, sequenced */
 #define HAMMER2_INODE_DELETING		0x1000	/* sync interlock, chain topo */
@@ -943,7 +953,7 @@ int hammer2_chain_inode_find(hammer2_pfs_t *, hammer2_key_t, int, int,
 hammer2_chain_t *hammer2_chain_bulksnap(hammer2_dev_t *);
 void hammer2_chain_bulkdrop(hammer2_chain_t *);
 int hammer2_chain_dirent_test(const hammer2_chain_t *, const char *, size_t);
-void hammer2_dump_chain(hammer2_chain_t *, int, int, int *, char, unsigned int);
+void hammer2_dump_chain(hammer2_chain_t *, int, int, int, char);
 
 RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
 RB_PROTOTYPE_SCAN(hammer2_chain_tree, hammer2_chain, rbnode);
@@ -969,6 +979,7 @@ int hammer2_freemap_alloc(hammer2_chain_t *, size_t);
 void hammer2_freemap_adjust(hammer2_dev_t *, hammer2_blockref_t *, int);
 
 /* hammer2_inode.c */
+void hammer2_inode_delayed_sideq(hammer2_inode_t *);
 void hammer2_inode_lock(hammer2_inode_t *, int);
 void hammer2_inode_unlock(hammer2_inode_t *);
 hammer2_chain_t *hammer2_inode_chain(hammer2_inode_t *, int, int);
@@ -982,17 +993,18 @@ hammer2_inode_t *hammer2_inode_get(hammer2_pfs_t *, hammer2_xop_head_t *,
     hammer2_tid_t, int);
 hammer2_key_t hammer2_inode_data_count(const hammer2_inode_t *);
 hammer2_key_t hammer2_inode_inode_count(const hammer2_inode_t *);
+void hammer2_inode_modify(hammer2_inode_t *);
 int hammer2_inode_chain_sync(hammer2_inode_t *);
 int hammer2_inode_chain_flush(hammer2_inode_t *, int);
 
 /* hammer2_io.c */
-hammer2_io_t *hammer2_io_getblk(hammer2_dev_t *, int, off_t, int, int);
+hammer2_io_t *hammer2_io_getblk(hammer2_dev_t *, int, hammer2_off_t, int, int);
 void hammer2_io_putblk(hammer2_io_t **);
 void hammer2_io_cleanup(hammer2_dev_t *, hammer2_io_tree_t *);
-char *hammer2_io_data(hammer2_io_t *, off_t);
-int hammer2_io_new(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
-int hammer2_io_newnz(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
-int hammer2_io_bread(hammer2_dev_t *, int, off_t, int, hammer2_io_t **);
+char *hammer2_io_data(hammer2_io_t *, hammer2_off_t);
+int hammer2_io_new(hammer2_dev_t *, int, hammer2_off_t, int, hammer2_io_t **);
+int hammer2_io_newnz(hammer2_dev_t *, int, hammer2_off_t, int, hammer2_io_t **);
+int hammer2_io_bread(hammer2_dev_t *, int, hammer2_off_t, int, hammer2_io_t **);
 void hammer2_io_setdirty(hammer2_io_t *);
 void hammer2_io_brelse(hammer2_io_t **);
 void hammer2_io_bqrelse(hammer2_io_t **);
@@ -1014,7 +1026,7 @@ int hammer2_init_devvp(struct mount *, const char *,
     hammer2_devvp_list_t *, struct nameidata *, struct proc *);
 void hammer2_cleanup_devvp(hammer2_devvp_list_t *);
 int hammer2_init_volumes(const hammer2_devvp_list_t *, hammer2_volume_t *,
-    hammer2_volume_data_t *, struct vnode **);
+    hammer2_volume_data_t *, int *, struct vnode **);
 hammer2_volume_t *hammer2_get_volume(hammer2_dev_t *, hammer2_off_t);
 
 /* hammer2_strategy.c */
@@ -1042,7 +1054,7 @@ char *kstrdup(const char *);
 void kstrfree(char *);
 
 /* hammer2_vfsops.c */
-int hammer2_vfs_sync(struct mount *, int);
+int hammer2_sync(struct mount *, int, int, struct ucred *, struct proc *);
 int hammer2_vfs_sync_pmp(hammer2_pfs_t *, int);
 void hammer2_pfs_memory_inc(hammer2_pfs_t *);
 void hammer2_voldata_lock(hammer2_dev_t *);

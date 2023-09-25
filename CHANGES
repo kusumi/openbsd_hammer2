@@ -1,3 +1,15 @@
+v1.1.5
+======
+- Drop mandatory read-only mount
+- Add hammer2(8) setcomp directive
+- Add hammer2(8) setcheck directive
+- Add hammer2(8) clrcheck directive
+- Add hammer2(8) setcrc32 directive
+- Add hammer2(8) setxxhash64 directive
+- Add hammer2(8) setsha192 directive
+- Minor fix and cleanup
+- Remove patch/obsolete/openbsd72.patch
+
 v1.1.4
 ======
 - Minor fix and cleanup

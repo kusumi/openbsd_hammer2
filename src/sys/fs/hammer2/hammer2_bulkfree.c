@@ -362,7 +362,7 @@ hammer2_bulkfree_scan(hammer2_chain_t *parent,
 	if (parent->bref.type == HAMMER2_BREF_TYPE_INODE &&
 	    (parent->bref.flags & HAMMER2_BREF_FLAG_PFSROOT) &&
 	    (error & ~HAMMER2_ERROR_EOF))
-		hprintf("encountered errors %08x while scanning \"%s\"\n",
+		hprintf("encountered errors %08x while scanning %s\n",
 		    error, parent->data->ipdata.filename);
 
 	/* Save with higher pri now that we know what it is. */
@@ -940,8 +940,8 @@ h2_bulkfree_sync(hammer2_bulkfree_info_t *cbinfo)
 		if (hammer2_chain_modify(live_chain, cbinfo->mtid, 0, 0)) {
 			hprintf("unable to modify freemap at %016jx for "
 			    "data-block %016jx error %d\n",
-			    live_chain->bref.data_off, (intmax_t)data_off,
-			    live_chain->error);
+			    (intmax_t)live_chain->bref.data_off,
+			    (intmax_t)data_off, live_chain->error);
 			hammer2_chain_unlock(live_chain);
 			hammer2_chain_drop(live_chain);
 			live_chain = NULL;
@@ -1056,7 +1056,7 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 					 */
 					hprintf("00->11 critical freemap "
 					    "transition for datablock %016jx\n",
-					    tmp_off);
+					    (intmax_t)tmp_off);
 					++cbinfo->count_00_11;
 					cbinfo->adj_free -=
 					    HAMMER2_FREEMAP_BLOCK_SIZE;

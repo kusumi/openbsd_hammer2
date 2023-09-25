@@ -396,8 +396,6 @@ hammer2_dedup_record(hammer2_chain_t *chain, hammer2_io_t *dio,
 	}
 
 	dedup += best;
-	//debug_hprintf("REC %04x %016jx %016jx\n",
-	//    (int)(dedup - hmp->heur_dedup), crc, chain->bref.data_off);
 	dedup->ticks = getticks();
 	dedup->data_off = chain->bref.data_off;
 	dedup->data_crc = crc;

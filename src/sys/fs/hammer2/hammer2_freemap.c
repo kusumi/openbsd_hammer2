@@ -577,9 +577,9 @@ hammer2_bmap_alloc(hammer2_dev_t *hmp, hammer2_bmap_data_t *bmap,
 		 * General element scan.
 		 * WARNING: (j) is iterating a bit index (by 2's)
 		 */
-		bmmask = (bmradix == HAMMER2_BMAP_BITS_PER_ELEMENT) ?
-		    HAMMER2_BMAP_ALLONES : ((hammer2_bitmap_t)1 << bmradix) - 1;
 		for (i = 0; i < HAMMER2_BMAP_ELEMENTS; ++i) {
+			bmmask = (bmradix == HAMMER2_BMAP_BITS_PER_ELEMENT) ?
+			    HAMMER2_BMAP_ALLONES : ((hammer2_bitmap_t)1 << bmradix) - 1;
 			for (j = 0; j < HAMMER2_BMAP_BITS_PER_ELEMENT; j += bmradix) {
 				if ((bmap->bitmapq[i] & bmmask) == 0)
 					goto success;

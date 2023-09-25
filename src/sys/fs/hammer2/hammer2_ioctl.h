@@ -90,6 +90,12 @@ struct hammer2_ioc_inode {
 
 typedef struct hammer2_ioc_inode hammer2_ioc_inode_t;
 
+#define HAMMER2IOC_INODE_FLAG_IQUOTA	0x00000001
+#define HAMMER2IOC_INODE_FLAG_DQUOTA	0x00000002
+#define HAMMER2IOC_INODE_FLAG_COPIES	0x00000004
+#define HAMMER2IOC_INODE_FLAG_CHECK	0x00000008
+#define HAMMER2IOC_INODE_FLAG_COMP	0x00000010
+
 /*
  * Ioctl for bulkfree scan.
  */
@@ -148,6 +154,7 @@ typedef struct hammer2_ioc_volume_list hammer2_ioc_volume_list_t;
 #define HAMMER2IOC_PFS_GET		_IOWR('h', 80, struct hammer2_ioc_pfs)
 #define HAMMER2IOC_PFS_LOOKUP		_IOWR('h', 83, struct hammer2_ioc_pfs)
 #define HAMMER2IOC_INODE_GET		_IOWR('h', 86, struct hammer2_ioc_inode)
+#define HAMMER2IOC_INODE_SET		_IOWR('h', 87, struct hammer2_ioc_inode)
 #define HAMMER2IOC_DEBUG_DUMP		_IOWR('h', 91, int)
 #define HAMMER2IOC_BULKFREE_SCAN	_IOWR('h', 92, struct hammer2_ioc_bulkfree)
 #define HAMMER2IOC_EMERG_MODE		_IOWR('h', 95, int)

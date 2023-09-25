@@ -112,6 +112,14 @@ hammer2_reclaim(void *v)
 	return (0);
 }
 
+#if 0
+static int
+hammer2_fsync(void *v)
+{
+	return (EOPNOTSUPP);
+}
+#endif
+
 static int
 hammer2_access(void *v)
 {
@@ -192,14 +200,16 @@ hammer2_setattr(void *v)
 	    || vap->va_blocksize != (long)VNOVAL
 	    || vap->va_rdev != (dev_t)VNOVAL
 	    || vap->va_bytes != (u_quad_t)VNOVAL
-	    || vap->va_gen != (u_long)VNOVAL
-	    || vap->va_flags != (u_long)VNOVAL
+	    || vap->va_gen != (u_long)VNOVAL)
+		return (EINVAL);
+
+	if (vap->va_flags != (u_long)VNOVAL
 	    || vap->va_uid != (uid_t)VNOVAL
 	    || vap->va_gid != (gid_t)VNOVAL
 	    || vap->va_atime.tv_sec != (time_t)VNOVAL
 	    || vap->va_mtime.tv_sec != (time_t)VNOVAL
 	    || vap->va_mode != (mode_t)VNOVAL)
-		return (EROFS);
+		return (EOPNOTSUPP);
 
 	if (vap->va_size != (u_quad_t)VNOVAL) {
 		switch (vp->v_type) {
@@ -207,7 +217,9 @@ hammer2_setattr(void *v)
 			return (EISDIR);
 		case VLNK:
 		case VREG:
-			return (EROFS);
+			if (vp->v_mount->mnt_flag & MNT_RDONLY)
+				return (EROFS);
+			return (0); /* implicit-fallthrough */
 		case VCHR:
 		case VBLK:
 		case VSOCK:
@@ -449,6 +461,14 @@ hammer2_read(void *v)
 	return (hammer2_read_file(ip, ap->a_uio, ap->a_ioflag));
 }
 
+#if 0
+static int
+hammer2_write(void *v)
+{
+	return (EOPNOTSUPP);
+}
+#endif
+
 static int
 hammer2_bmap(void *v)
 {
@@ -629,6 +649,174 @@ hammer2_nresolve(void *v)
 	return (error);
 }
 
+#if 0
+static int
+hammer2_mknod(void *v)
+{
+	return (EOPNOTSUPP);
+}
+#endif
+
+static int
+hammer2_mkdir(void *v)
+{
+	struct vop_mkdir_args /* {
+		struct vnode *a_dvp;
+		struct vnode **a_vpp;
+		struct componentname *a_cnp;
+		struct vattr *a_vap;
+	} */ *ap = v;
+
+	VOP_ABORTOP(ap->a_dvp, ap->a_cnp);
+	vput(ap->a_dvp);
+
+	return (EOPNOTSUPP);
+}
+
+#if 0
+static int
+hammer2_create(void *v)
+{
+	return (EOPNOTSUPP);
+}
+#endif
+
+static int
+hammer2_rmdir(void *v)
+{
+	struct vop_rmdir_args /* {
+		struct vnode *a_dvp;
+		struct vnode *a_vp;
+		struct componentname *a_cnp;
+	} */ *ap = v;
+
+	VOP_ABORTOP(ap->a_dvp, ap->a_cnp);
+	vput(ap->a_dvp);
+
+	vput(ap->a_vp);
+
+	return (EOPNOTSUPP);
+}
+
+static int
+hammer2_remove(void *v)
+{
+	struct vop_remove_args /* {
+		struct vnode *a_dvp;
+		struct vnode *a_vp;
+		struct componentname *a_cnp;
+	} */ *ap = v;
+
+	if (ap->a_dvp == ap->a_vp)
+		vrele(ap->a_vp);
+	else
+		vput(ap->a_vp);
+
+	VOP_ABORTOP(ap->a_dvp, ap->a_cnp);
+	vput(ap->a_dvp);
+
+	return (EOPNOTSUPP);
+}
+
+static int
+hammer2_rename(void *v)
+{
+	struct vop_rename_args /* {
+		struct vnode *a_fdvp;
+		struct vnode *a_fvp;
+		struct componentname *a_fcnp;
+		struct vnode *a_tdvp;
+		struct vnode *a_tvp;
+		struct componentname *a_tcnp;
+	} */ *ap = v;
+	struct vnode *tvp = ap->a_tvp;
+	struct vnode *tdvp = ap->a_tdvp;
+	struct vnode *fvp = ap->a_fvp;
+	struct vnode *fdvp = ap->a_fdvp;
+	struct componentname *tcnp = ap->a_tcnp;
+	struct componentname *fcnp = ap->a_fcnp;
+	int error;
+
+	/* Check for cross-device rename. */
+	if ((fvp->v_mount != tdvp->v_mount) ||
+	    (tvp && (fvp->v_mount != tvp->v_mount))) {
+		error = EXDEV;
+abortit:
+		VOP_ABORTOP(tdvp, tcnp); /* XXX, why not in NFS? */
+		if (tdvp == tvp)
+			vrele(tdvp);
+		else
+			vput(tdvp);
+		if (tvp)
+			vput(tvp);
+		VOP_ABORTOP(fdvp, fcnp); /* XXX, why not in NFS? */
+		vrele(fdvp);
+		vrele(fvp);
+		return (error);
+	}
+
+	/* Check if just deleting a link name. */
+	if (fvp == tvp) {
+		if (fvp->v_type == VDIR) {
+			error = EINVAL;
+			goto abortit;
+		}
+
+		/* Release destination completely. */
+		VOP_ABORTOP(tdvp, tcnp);
+		vput(tdvp);
+		vput(tvp);
+
+		/* Delete source. */
+		vrele(fdvp);
+		vrele(fvp);
+		fcnp->cn_flags &= ~MODMASK;
+		fcnp->cn_flags |= LOCKPARENT | LOCKLEAF;
+		if ((fcnp->cn_flags & SAVESTART) == 0)
+			hpanic("lost from startdir");
+		fcnp->cn_nameiop = DELETE;
+		(void) vfs_relookup(fdvp, &fvp, fcnp);
+		return (VOP_REMOVE(fdvp, fvp, fcnp));
+	}
+	error = EOPNOTSUPP;
+	if (error)
+		goto abortit;
+
+	return (EOPNOTSUPP);
+}
+
+static int
+hammer2_link(void *v)
+{
+	struct vop_link_args /* {
+		struct vnode *a_dvp;
+		struct vnode *a_vp;
+		struct componentname *a_cnp;
+	} */ *ap = v;
+
+	VOP_ABORTOP(ap->a_dvp, ap->a_cnp);
+	vput(ap->a_dvp);
+
+	return (EOPNOTSUPP);
+}
+
+static int
+hammer2_symlink(void *v)
+{
+	struct vop_symlink_args /* {
+		struct vnode *a_dvp;
+		struct vnode **a_vpp;
+		struct componentname *a_cnp;
+		struct vattr *a_vap;
+		char *a_target;
+	} */ *ap = v;
+
+	VOP_ABORTOP(ap->a_dvp, ap->a_cnp);
+	vput(ap->a_dvp);
+
+	return (EOPNOTSUPP);
+}
+
 static int
 hammer2_open(void *v)
 {
@@ -734,38 +922,6 @@ hammer2_pathconf(void *v)
 	}
 
 	return (error);
-}
-
-static int
-hammer2_link(void *v)
-{
-	struct vop_link_args /* {
-		struct vnode *a_dvp;
-		struct vnode *a_vp;
-		struct componentname *a_cnp;
-	} */ *ap = v;
-
-	VOP_ABORTOP(ap->a_dvp, ap->a_cnp);
-	vput(ap->a_dvp);
-
-	return (EROFS);
-}
-
-static int
-hammer2_symlink(void *v)
-{
-	struct vop_symlink_args /* {
-		struct vnode *a_dvp;
-		struct vnode **a_vpp;
-		struct componentname *a_cnp;
-		struct vattr *a_vap;
-		char *a_target;
-	} */ *ap = v;
-
-	VOP_ABORTOP(ap->a_dvp, ap->a_cnp);
-	vput(ap->a_dvp);
-
-	return (EROFS);
 }
 
 static int
@@ -992,11 +1148,11 @@ const struct vops hammer2_vops = {
 	.vop_kqfilter	= hammer2_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
 	.vop_fsync	= nullop,
-	.vop_remove	= eopnotsupp,
+	.vop_remove	= hammer2_remove,
 	.vop_link	= hammer2_link,
-	.vop_rename	= eopnotsupp,
-	.vop_mkdir	= eopnotsupp,
-	.vop_rmdir	= eopnotsupp,
+	.vop_rename	= hammer2_rename,
+	.vop_mkdir	= hammer2_mkdir,
+	.vop_rmdir	= hammer2_rmdir,
 	.vop_symlink	= hammer2_symlink,
 	.vop_readdir	= hammer2_readdir,
 	.vop_readlink	= hammer2_readlink,
