@@ -42,6 +42,9 @@
 #include <sys/specdev.h>
 
 static int hammer2_unmount(struct mount *, int, struct proc *);
+static int hammer2_recovery(hammer2_dev_t *);
+static int hammer2_fixup_pfses(hammer2_dev_t *);
+static int hammer2_remount(hammer2_dev_t *, struct mount *);
 static int hammer2_statfs(struct mount *, struct statfs *, struct proc *);
 static void hammer2_update_pmps(hammer2_dev_t *);
 static void hammer2_mount_helper(struct mount *, hammer2_pfs_t *);
@@ -467,9 +470,11 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 	hammer2_devvp_t *e, *e_tmp;
 	hammer2_chain_t *schain;
 	hammer2_xop_head_t *xop;
+	hammer2_cluster_t *cluster;
 	char devstr[MNAMELEN] = {0};
 	char fnamestr[MNAMELEN] = {0};
 	char *label = NULL;
+	int rdonly = (mp->mnt_flag & MNT_RDONLY) != 0;
 	int i, error, devvp_found;
 	size_t dlen;
 
@@ -479,8 +484,25 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 	}
 
 	if (mp->mnt_flag & MNT_UPDATE) {
+		/*
+		 * Update mount.  Note that pmp->iroot->cluster is
+		 * an inode-embedded cluster and thus cannot be
+		 * directly locked.
+		 */
+		error = 0;
 		pmp = MPTOPMP(mp);
-		KASSERT(pmp);
+		cluster = &pmp->iroot->cluster;
+		for (i = 0; i < cluster->nchains; ++i) {
+			if (cluster->array[i].chain == NULL)
+				continue;
+			hmp = cluster->array[i].chain->hmp;
+			error = hammer2_remount(hmp, mp);
+			if (error)
+				break;
+		}
+		if (error)
+			return (error);
+
 		if (args && args->fspec == NULL) {
 			/* Process export requests. */
 			return (vfs_export(mp, &pmp->pm_export,
@@ -525,7 +547,7 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 	}
 
 	debug_hprintf("device \"%s\" label \"%s\" rdonly %d\n",
-	    devstr, label, (mp->mnt_flag & MNT_RDONLY) != 0);
+	    devstr, label, rdonly);
 
 	/* Initialize all device vnodes. */
 	TAILQ_INIT(&devvpl);
@@ -642,6 +664,7 @@ next_hmp:
 			return (EINVAL);
 		}
 
+		hmp->rdonly = rdonly;
 		hmp->hflags = args->hflags & HMNT2_DEVFLAGS;
 		KKASSERT(hmp->hflags & HMNT2_LOCAL);
 
@@ -803,6 +826,13 @@ next_hmp:
 		hammer2_mtx_unlock(&spmp->iroot->lock);
 		hammer2_mtx_unlock(&spmp->iroot->lock);
 #endif
+		if (!hmp->rdonly) {
+			error = hammer2_recovery(hmp);
+			if (error == 0)
+				error |= hammer2_fixup_pfses(hmp);
+			/* XXX do something with error */
+		}
+
 		/*
 		 * A false-positive lock order reversal may be detected.
 		 * There are 2 directions of locking, which is a bad design.
@@ -1156,6 +1186,288 @@ again:
 	hammer2_print_iostat(&hmp->iostat_write, "write");
 
 	free(hmp, M_HAMMER2, 0);
+}
+
+/*
+ * Mount-time recovery (RW mounts)
+ *
+ * Updates to the free block table are allowed to lag flushes by one
+ * transaction.  In case of a crash, then on a fresh mount we must do an
+ * incremental scan of the last committed transaction id and make sure that
+ * all related blocks have been marked allocated.
+ */
+struct hammer2_recovery_elm {
+	TAILQ_ENTRY(hammer2_recovery_elm) entry;
+	hammer2_chain_t *chain;
+	hammer2_tid_t sync_tid;
+};
+
+TAILQ_HEAD(hammer2_recovery_list, hammer2_recovery_elm);
+
+struct hammer2_recovery_info {
+	struct hammer2_recovery_list list;
+	hammer2_tid_t mtid;
+	int depth;
+};
+
+static int hammer2_recovery_scan(hammer2_dev_t *, hammer2_chain_t *,
+    struct hammer2_recovery_info *, hammer2_tid_t);
+
+#define HAMMER2_RECOVERY_MAXDEPTH	10
+
+static int
+hammer2_recovery(hammer2_dev_t *hmp)
+{
+	struct hammer2_recovery_info info;
+	struct hammer2_recovery_elm *elm;
+	hammer2_chain_t *parent;
+	hammer2_tid_t sync_tid, mirror_tid;
+	int error;
+
+	hammer2_trans_init(hmp->spmp, 0);
+
+	sync_tid = hmp->voldata.freemap_tid;
+	mirror_tid = hmp->voldata.mirror_tid;
+
+	if (sync_tid >= mirror_tid)
+		debug_hprintf("no recovery needed\n");
+	else
+		hprintf("freemap recovery %016jx-%016jx\n",
+		    sync_tid + 1, mirror_tid);
+
+	TAILQ_INIT(&info.list);
+	info.depth = 0;
+	parent = hammer2_chain_lookup_init(&hmp->vchain, 0);
+	error = hammer2_recovery_scan(hmp, parent, &info, sync_tid);
+	hammer2_chain_lookup_done(parent);
+
+	while ((elm = TAILQ_FIRST(&info.list)) != NULL) {
+		TAILQ_REMOVE(&info.list, elm, entry);
+		parent = elm->chain;
+		sync_tid = elm->sync_tid;
+		free(elm, M_HAMMER2, 0);
+
+		hammer2_chain_lock(parent, HAMMER2_RESOLVE_ALWAYS);
+		error |= hammer2_recovery_scan(hmp, parent, &info,
+		    hmp->voldata.freemap_tid);
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent); /* drop elm->chain ref */
+	}
+
+	hammer2_trans_done(hmp->spmp, 0);
+
+	return (error);
+}
+
+static int
+hammer2_recovery_scan(hammer2_dev_t *hmp, hammer2_chain_t *parent,
+    struct hammer2_recovery_info *info, hammer2_tid_t sync_tid)
+{
+	hammer2_chain_t *chain;
+	hammer2_blockref_t bref;
+	struct hammer2_recovery_elm *elm;
+	const hammer2_inode_data_t *ripdata;
+	int tmp_error, rup_error, error, first;
+
+	/* Adjust freemap to ensure that the block(s) are marked allocated. */
+	if (parent->bref.type != HAMMER2_BREF_TYPE_VOLUME)
+		hammer2_freemap_adjust(hmp, &parent->bref,
+		    HAMMER2_FREEMAP_DORECOVER);
+
+	/* Check type for recursive scan. */
+	switch (parent->bref.type) {
+	case HAMMER2_BREF_TYPE_VOLUME:
+		/* data already instantiated */
+		break;
+	case HAMMER2_BREF_TYPE_INODE:
+		/*
+		 * Must instantiate data for DIRECTDATA test and also
+		 * for recursion.
+		 */
+		hammer2_chain_lock(parent, HAMMER2_RESOLVE_ALWAYS);
+		ripdata = &parent->data->ipdata;
+		if (ripdata->meta.op_flags & HAMMER2_OPFLAG_DIRECTDATA) {
+			/* not applicable to recovery scan */
+			hammer2_chain_unlock(parent);
+			return (0);
+		}
+		hammer2_chain_unlock(parent);
+		break;
+	case HAMMER2_BREF_TYPE_INDIRECT:
+		/* Must instantiate data for recursion. */
+		hammer2_chain_lock(parent, HAMMER2_RESOLVE_ALWAYS);
+		hammer2_chain_unlock(parent);
+		break;
+	case HAMMER2_BREF_TYPE_DIRENT:
+	case HAMMER2_BREF_TYPE_DATA:
+	case HAMMER2_BREF_TYPE_FREEMAP:
+	case HAMMER2_BREF_TYPE_FREEMAP_NODE:
+	case HAMMER2_BREF_TYPE_FREEMAP_LEAF:
+		/* not applicable to recovery scan */
+		return (0);
+		break;
+	default:
+		return (HAMMER2_ERROR_BADBREF);
+	}
+
+	/* Defer operation if depth limit reached. */
+	if (info->depth >= HAMMER2_RECOVERY_MAXDEPTH) {
+		elm = malloc(sizeof(*elm), M_HAMMER2, M_ZERO | M_WAITOK);
+		elm->chain = parent;
+		elm->sync_tid = sync_tid;
+		hammer2_chain_ref(parent);
+		TAILQ_INSERT_TAIL(&info->list, elm, entry);
+		/* unlocked by caller */
+		return (0);
+	}
+
+	/*
+	 * Recursive scan of the last flushed transaction only.  We are
+	 * doing this without pmp assignments so don't leave the chains
+	 * hanging around after we are done with them.
+	 *
+	 * error	Cumulative error this level only
+	 * rup_error	Cumulative error for recursion
+	 * tmp_error	Specific non-cumulative recursion error
+	 */
+	chain = NULL;
+	first = 1;
+	rup_error = 0;
+	error = 0;
+
+	for (;;) {
+		error |= hammer2_chain_scan(parent, &chain, &bref, &first,
+		    HAMMER2_LOOKUP_NODATA);
+		/* Problem during scan or EOF. */
+		if (error)
+			break;
+
+		/* If this is a leaf. */
+		if (chain == NULL) {
+			if (bref.mirror_tid > sync_tid)
+				hammer2_freemap_adjust(hmp, &bref,
+				    HAMMER2_FREEMAP_DORECOVER);
+			continue;
+		}
+
+		/* This may or may not be a recursive node. */
+		atomic_set_int(&chain->flags, HAMMER2_CHAIN_RELEASE);
+		if (bref.mirror_tid > sync_tid) {
+			++info->depth;
+			tmp_error = hammer2_recovery_scan(hmp, chain, info,
+			    sync_tid);
+			--info->depth;
+		} else {
+			tmp_error = 0;
+		}
+
+		/*
+		 * Flush the recovery at the PFS boundary to stage it for
+		 * the final flush of the super-root topology.
+		 */
+		if (tmp_error == 0 &&
+		    (bref.flags & HAMMER2_BREF_FLAG_PFSROOT) &&
+		    (chain->flags & HAMMER2_CHAIN_ONFLUSH))
+			hammer2_flush(chain,
+			    HAMMER2_FLUSH_TOP | HAMMER2_FLUSH_ALL);
+		rup_error |= tmp_error;
+	}
+	return ((error | rup_error) & ~HAMMER2_ERROR_EOF);
+}
+
+/*
+ * This fixes up an error introduced in earlier H2 implementations where
+ * moving a PFS inode into an indirect block wound up causing the
+ * HAMMER2_BREF_FLAG_PFSROOT flag in the bref to get cleared.
+ */
+static int
+hammer2_fixup_pfses(hammer2_dev_t *hmp)
+{
+	const hammer2_inode_data_t *ripdata;
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next;
+	hammer2_pfs_t *spmp;
+	int error = 0, error2;
+
+	/*
+	 * Lookup mount point under the media-localized super-root.
+	 *
+	 * cluster->pmp will incorrectly point to spmp and must be fixed
+	 * up later on.
+	 */
+	spmp = hmp->spmp;
+	hammer2_inode_lock(spmp->iroot, 0);
+	parent = hammer2_inode_chain(spmp->iroot, 0, HAMMER2_RESOLVE_ALWAYS);
+	chain = hammer2_chain_lookup(&parent, &key_next, HAMMER2_KEY_MIN,
+	    HAMMER2_KEY_MAX, &error, 0);
+
+	while (chain) {
+		if (chain->bref.type != HAMMER2_BREF_TYPE_INODE)
+			continue;
+		if (chain->error) {
+			hprintf("I/O error scanning PFS labels\n");
+			error |= chain->error;
+		} else if ((chain->bref.flags & HAMMER2_BREF_FLAG_PFSROOT) == 0) {
+			ripdata = &chain->data->ipdata;
+			hammer2_trans_init(hmp->spmp, 0);
+			error2 = hammer2_chain_modify(chain,
+			    chain->bref.modify_tid, 0, 0);
+			if (error2 == 0) {
+				hprintf("correct mis-flagged PFS %s\n",
+				    ripdata->filename);
+				chain->bref.flags |= HAMMER2_BREF_FLAG_PFSROOT;
+			} else {
+				error |= error2;
+			}
+			hammer2_flush(chain,
+			    HAMMER2_FLUSH_TOP | HAMMER2_FLUSH_ALL);
+			hammer2_trans_done(hmp->spmp, 0);
+		}
+		chain = hammer2_chain_next(&parent, chain, &key_next, key_next,
+		    HAMMER2_KEY_MAX, &error, 0);
+	}
+
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+	}
+	hammer2_inode_unlock(spmp->iroot);
+
+	return (error);
+}
+
+static int
+hammer2_remount(hammer2_dev_t *hmp, struct mount *mp)
+{
+	hammer2_volume_t *vol;
+	int i, error = 0;
+
+	if (!hmp->rdonly && (mp->mnt_flag & MNT_RDONLY)) {
+		hprintf("update to read-only mount unsupported\n");
+		error = EOPNOTSUPP;
+	} else if (hmp->rdonly && (mp->mnt_flag & MNT_WANTRDWR)) {
+		for (i = 0; i < hmp->nvolumes; ++i) {
+			vol = &hmp->volumes[i];
+			if (vol->id == HAMMER2_ROOT_VOLUME) {
+				error = hammer2_recovery(hmp);
+				if (error == 0)
+					error |= hammer2_fixup_pfses(hmp);
+			}
+			if (error)
+				return (hammer2_error_to_errno(error));
+		}
+		KKASSERT(i == hmp->nvolumes);
+		KKASSERT(error == 0);
+
+		hmp->rdonly = 0;
+	} else {
+		debug_hprintf("nothing changed\n");
+	}
+
+	debug_hprintf("MNT_RDONLY %d rdonly %d error %d\n",
+	    (mp->mnt_flag & MNT_RDONLY) ? 1 : 0, hmp->rdonly, error);
+
+	return (error);
 }
 
 /*
@@ -1583,6 +1895,7 @@ hammer2_root(struct mount *mp, struct vnode **vpp)
 		hammer2_inode_unlock(pmp->iroot);
 		*vpp = NULL;
 	} else {
+		/* lock order reversal: iroot->lock -> v_vnlock */
 		error = hammer2_igetv(mp, pmp->iroot, vpp);
 		hammer2_inode_unlock(pmp->iroot);
 	}

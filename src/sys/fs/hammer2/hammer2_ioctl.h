@@ -113,6 +113,19 @@ struct hammer2_ioc_bulkfree {
 typedef struct hammer2_ioc_bulkfree hammer2_ioc_bulkfree_t;
 
 /*
+ * Unconditionally delete a hammer2 directory entry or inode number.
+ */
+struct hammer2_ioc_destroy {
+	enum { HAMMER2_DELETE_NOP,
+	       HAMMER2_DELETE_FILE,
+	       HAMMER2_DELETE_INUM } cmd;
+	char			path[HAMMER2_INODE_MAXNAME];
+	hammer2_key_t		inum;
+};
+
+typedef struct hammer2_ioc_destroy hammer2_ioc_destroy_t;
+
+/*
  * Grow the filesystem.  If size is set to 0 H2 will auto-size to the
  * partition it is in.  The caller can resize the partition, then issue
  * the ioctl.
@@ -157,6 +170,7 @@ typedef struct hammer2_ioc_volume_list hammer2_ioc_volume_list_t;
 #define HAMMER2IOC_INODE_SET		_IOWR('h', 87, struct hammer2_ioc_inode)
 #define HAMMER2IOC_DEBUG_DUMP		_IOWR('h', 91, int)
 #define HAMMER2IOC_BULKFREE_SCAN	_IOWR('h', 92, struct hammer2_ioc_bulkfree)
+#define HAMMER2IOC_DESTROY		_IOWR('h', 94, struct hammer2_ioc_destroy)
 #define HAMMER2IOC_EMERG_MODE		_IOWR('h', 95, int)
 #define HAMMER2IOC_GROWFS		_IOWR('h', 96, struct hammer2_ioc_growfs)
 #define HAMMER2IOC_VOLUME_LIST		_IOWR('h', 97, struct hammer2_ioc_volume_list)

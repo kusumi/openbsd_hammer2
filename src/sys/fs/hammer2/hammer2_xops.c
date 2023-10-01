@@ -38,6 +38,93 @@
 #include "hammer2.h"
 
 /*
+ * Determine if the specified directory is empty.
+ *
+ *	Returns 0 on success.
+ *
+ *	Returns HAMMER_ERROR_EAGAIN if caller must re-lookup the entry and
+ *	retry. (occurs if we race a ripup on oparent or ochain).
+ *
+ *	Or returns a permanent HAMMER2_ERROR_* error mask.
+ *
+ * The caller must pass in an exclusively locked oparent and ochain.  This
+ * function will handle the case where the chain is a directory entry or
+ * the inode itself.  The original oparent,ochain will be locked upon return.
+ *
+ * This function will unlock the underlying oparent,ochain temporarily when
+ * doing an inode lookup to avoid deadlocks.  The caller MUST handle the EAGAIN
+ * result as this means that oparent is no longer the parent of ochain, or
+ * that ochain was destroyed while it was unlocked.
+ */
+static int
+checkdirempty(hammer2_chain_t *oparent, hammer2_chain_t *ochain, int clindex)
+{
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next, inum;
+	int error = 0, didunlock = 0;
+
+	/*
+	 * Find the inode, set it up as a locked 'chain'.  ochain can be the
+	 * inode itself, or it can be a directory entry.
+	 */
+	if (ochain->bref.type == HAMMER2_BREF_TYPE_DIRENT) {
+		inum = ochain->bref.embed.dirent.inum;
+		hammer2_chain_unlock(ochain);
+		hammer2_chain_unlock(oparent);
+
+		parent = NULL;
+		chain = NULL;
+		error = hammer2_chain_inode_find(ochain->pmp, inum, clindex, 0,
+		    &parent, &chain);
+		if (parent) {
+			hammer2_chain_unlock(parent);
+			hammer2_chain_drop(parent);
+		}
+		didunlock = 1;
+	} else {
+		/* The directory entry *is* the directory inode. */
+		chain = hammer2_chain_lookup_init(ochain, 0);
+	}
+
+	/*
+	 * Determine if the directory is empty or not by checking its
+	 * visible namespace (the area which contains directory entries).
+	 */
+	if (error == 0) {
+		parent = chain;
+		chain = NULL;
+		if (parent)
+			chain = hammer2_chain_lookup(&parent, &key_next,
+			    HAMMER2_DIRHASH_VISIBLE, HAMMER2_KEY_MAX, &error,
+			    0);
+		if (chain) {
+			error = HAMMER2_ERROR_ENOTEMPTY;
+			hammer2_chain_unlock(chain);
+			hammer2_chain_drop(chain);
+		}
+		hammer2_chain_lookup_done(parent);
+	} else {
+		if (chain) {
+			hammer2_chain_unlock(chain);
+			hammer2_chain_drop(chain);
+			chain = NULL; /* safety */
+		}
+	}
+
+	if (didunlock) {
+		hammer2_chain_lock(oparent, HAMMER2_RESOLVE_ALWAYS);
+		hammer2_chain_lock(ochain, HAMMER2_RESOLVE_ALWAYS);
+		if ((ochain->flags & HAMMER2_CHAIN_DELETED) ||
+		    (oparent->flags & HAMMER2_CHAIN_DELETED) ||
+		    ochain->parent != oparent) {
+			hprintf("CHECKDIR inum %016jx RETRY\n", (intmax_t)inum);
+			error = HAMMER2_ERROR_EAGAIN;
+		}
+	}
+	return (error);
+}
+
+/*
  * Backend for hammer2_vfs_root().
  *
  * This is called when a newly mounted PFS has not yet synchronized
@@ -175,6 +262,173 @@ done:
 }
 
 /*
+ * Backend for hammer2_vop_nremove(), hammer2_vop_nrmdir(), and
+ * backend for pfs_delete.
+ *
+ * This function locates and removes a directory entry, and will lookup
+ * and return the underlying inode.  For directory entries the underlying
+ * inode is not removed.  If the directory entry is the actual inode itself,
+ * it may be conditonally removed and returned.
+ *
+ * WARNING!  Any target inode's nlinks may not be synchronized to the
+ *	     in-memory inode.  The frontend's hammer2_inode_unlink_finisher()
+ *	     is responsible for the final disposition of the actual inode.
+ */
+void
+hammer2_xop_unlink(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_unlink_t *xop = &arg->xop_unlink;
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next, lhc;
+	const char *name;
+	size_t name_len;
+	uint8_t type;
+	int error, error2, dopermanent, doforce;
+again:
+	/* Requires exclusive lock. */
+	parent = hammer2_inode_chain(xop->head.ip1, clindex,
+	    HAMMER2_RESOLVE_ALWAYS);
+	chain = NULL;
+	if (parent == NULL) {
+		hprintf("NULL parent\n");
+		error = HAMMER2_ERROR_EIO;
+		goto done;
+	}
+	name = xop->head.name1;
+	name_len = xop->head.name1_len;
+
+	/* Lookup the directory entry. */
+	lhc = hammer2_dirhash(name, name_len);
+	chain = hammer2_chain_lookup(&parent, &key_next, lhc,
+	    lhc + HAMMER2_DIRHASH_LOMASK, &error, HAMMER2_LOOKUP_ALWAYS);
+	while (chain) {
+		if (hammer2_chain_dirent_test(chain, name, name_len))
+			break;
+		chain = hammer2_chain_next(&parent, chain, &key_next, key_next,
+		    lhc + HAMMER2_DIRHASH_LOMASK, &error,
+		    HAMMER2_LOOKUP_ALWAYS);
+	}
+
+	/*
+	 * The directory entry will either be a BREF_TYPE_DIRENT or a
+	 * BREF_TYPE_INODE.  We always permanently delete DIRENTs, but
+	 * must go by xop->dopermanent for BREF_TYPE_INODE.
+	 *
+	 * Note that the target chain's nlinks may not be synchronized with
+	 * the in-memory hammer2_inode_t structure, so we don't try to do
+	 * anything fancy here.  The frontend deals with nlinks
+	 * synchronization.
+	 */
+	if (chain && chain->error == 0) {
+		dopermanent = xop->dopermanent & H2DOPERM_PERMANENT;
+		doforce = xop->dopermanent & H2DOPERM_FORCE;
+
+		/*
+		 * If the directory entry is the actual inode then use its
+		 * type for the directory typing tests, otherwise if it is
+		 * a directory entry, pull the type field from the entry.
+		 *
+		 * Directory entries are always permanently deleted
+		 * (because they aren't the actual inode).
+		 */
+		if (chain->bref.type == HAMMER2_BREF_TYPE_DIRENT) {
+			type = chain->bref.embed.dirent.type;
+			dopermanent |= HAMMER2_DELETE_PERMANENT;
+		} else {
+			type = chain->data->ipdata.meta.type;
+		}
+
+		/*
+		 * Check directory typing and delete the entry.  Note that
+		 * nlinks adjustments are made on the real inode by the
+		 * frontend, not here.
+		 *
+		 * Unfortunately, checkdirempty() may have to unlock (parent).
+		 * If it no longer matches chain->parent after re-locking,
+		 * EAGAIN is returned.
+		 */
+		if (type == HAMMER2_OBJTYPE_DIRECTORY && doforce) {
+			/*
+			 * If doforce then execute the operation even if
+			 * the directory is not empty or errored.  We
+			 * ignore chain->error here, allowing an errored
+			 * chain (aka directory entry) to still be deleted.
+			 */
+			error = hammer2_chain_delete(parent, chain,
+			    xop->head.mtid, dopermanent);
+		} else if (type == HAMMER2_OBJTYPE_DIRECTORY &&
+		    xop->isdir == 0) {
+			error = HAMMER2_ERROR_EISDIR;
+		} else if (type == HAMMER2_OBJTYPE_DIRECTORY &&
+		    (error = checkdirempty(parent, chain, clindex)) != 0) {
+			/* error may be EAGAIN or ENOTEMPTY. */
+			if (error == HAMMER2_ERROR_EAGAIN) {
+				hammer2_chain_unlock(chain);
+				hammer2_chain_drop(chain);
+				hammer2_chain_unlock(parent);
+				hammer2_chain_drop(parent);
+				goto again;
+			}
+		} else if (type != HAMMER2_OBJTYPE_DIRECTORY &&
+		    xop->isdir >= 1) {
+			error = HAMMER2_ERROR_ENOTDIR;
+		} else {
+			/*
+			 * Delete the directory entry.  chain might also
+			 * be a directly-embedded inode.
+			 *
+			 * Allow the deletion to proceed even if the chain
+			 * is errored.  Give priority to error-on-delete over
+			 * chain->error.
+			 */
+			error = hammer2_chain_delete(parent, chain,
+			    xop->head.mtid, dopermanent);
+			if (error == 0)
+				error = chain->error;
+		}
+	} else {
+		if (chain && error == 0)
+			error = chain->error;
+	}
+
+	/*
+	 * If chain is a directory entry we must resolve it.  We do not try
+	 * to manipulate the contents as it might not be synchronized with
+	 * the frontend hammer2_inode_t, nor do we try to lookup the
+	 * frontend hammer2_inode_t here (we are the backend!).
+	 */
+	if (chain && chain->bref.type == HAMMER2_BREF_TYPE_DIRENT &&
+	    (xop->dopermanent & H2DOPERM_IGNINO) == 0) {
+		lhc = chain->bref.embed.dirent.inum;
+		error2 = hammer2_chain_inode_find(chain->pmp, lhc, clindex, 0,
+		    &parent, &chain);
+		if (error2) {
+			hprintf("lhc %016jx failed\n", (intmax_t)lhc);
+			error2 = 0; /* silently ignore */
+		}
+		if (error == 0)
+			error = error2;
+	}
+
+	/*
+	 * Return the inode target for further action.  Typically used by
+	 * hammer2_inode_unlink_finisher().
+	 */
+done:
+	hammer2_xop_feed(&xop->head, chain, clindex, error);
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+		chain = NULL;
+	}
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+		parent = NULL;
+	}
+}
+
+/*
  * Generic lookup of a specific key.
  */
 void
@@ -207,6 +461,49 @@ hammer2_xop_lookup(hammer2_xop_t *arg, int clindex)
 			error = HAMMER2_ERROR_ENOENT;
 	}
 	hammer2_xop_feed(&xop->head, chain, clindex, error);
+done:
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+	}
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+	}
+}
+
+void
+hammer2_xop_delete(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_lookup_t *xop = &arg->xop_lookup;
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next;
+	int error = 0;
+
+	parent = hammer2_inode_chain(xop->head.ip1, clindex,
+	    HAMMER2_RESOLVE_ALWAYS);
+	chain = NULL;
+	if (parent == NULL) {
+		error = HAMMER2_ERROR_EIO;
+		goto done;
+	}
+
+	/*
+	 * Lookup all possibly conflicting directory entries, the feed
+	 * inherits the chain's lock so do not unlock it on the iteration.
+	 */
+	chain = hammer2_chain_lookup(&parent, &key_next, xop->lhc, xop->lhc,
+	    &error, HAMMER2_LOOKUP_NODATA);
+	if (error == 0) {
+		if (chain)
+			error = chain->error;
+		else
+			error = HAMMER2_ERROR_ENOENT;
+	}
+	if (chain)
+		error = hammer2_chain_delete(parent, chain, xop->head.mtid,
+		    HAMMER2_DELETE_PERMANENT);
+	hammer2_xop_feed(&xop->head, NULL, clindex, error);
 done:
 	if (chain) {
 		hammer2_chain_unlock(chain);

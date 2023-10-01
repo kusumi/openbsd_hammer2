@@ -97,6 +97,8 @@ int cmd_dhash(int ac, const char **av);
 int cmd_info(int ac, const char **av);
 int cmd_mountall(int ac, const char **av);
 int cmd_stat(int ac, const char **av);
+int cmd_destroy_path(int ac, const char **av);
+int cmd_destroy_inum(const char *sel_path, int ac, const char **av);
 int cmd_dumpchain(const char *path, u_int flags);
 int cmd_emergency_mode(const char *sel_path, int enable, int ac,
     const char **av);
@@ -106,6 +108,7 @@ int cmd_volume_list(int ac, char **av);
 int cmd_setcomp(const char *comp_str, char **paths);
 int cmd_setcheck(const char *comp_str, char **paths);
 int cmd_bulkfree(const char *dir_path);
+int cmd_cleanup(const char *dir_path);
 
 void print_inode(const char *path);
 

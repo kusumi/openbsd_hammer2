@@ -1,3 +1,10 @@
+v1.1.6
+======
+- Support MNT_UPDATE
+- Add hammer2(8) cleanup directive
+- Add hammer2(8) destroy directive
+- Add hammer2(8) destroy-inum directive
+
 v1.1.5
 ======
 - Drop mandatory read-only mount

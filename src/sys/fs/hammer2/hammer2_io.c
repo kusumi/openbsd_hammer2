@@ -243,7 +243,7 @@ hammer2_io_getblk(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
 			}
 		}
 	}
- 	//KKASSERT(error == 0 || dio->bp == NULL);
+	//KKASSERT(error == 0 || dio->bp == NULL);
 
 	/* XXX
 	if (dio->bp)

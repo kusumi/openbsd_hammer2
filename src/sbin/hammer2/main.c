@@ -134,6 +134,23 @@ main(int ac, char **av)
 		else
 			ecode = cmd_dumpchain(av[1],
 					      (u_int)strtoul(av[2], NULL, 0));
+	} else if (strcmp(av[0], "destroy") == 0) {
+		if (ac < 2) {
+			fprintf(stderr,
+				"destroy: specify one or more paths to "
+				"destroy\n");
+			usage(1);
+		}
+		ecode = cmd_destroy_path(ac - 1, (const char **)(void *)&av[1]);
+	} else if (strcmp(av[0], "destroy-inum") == 0) {
+		if (ac < 2) {
+			fprintf(stderr,
+				"destroy-inum: specify one or more inode "
+				"numbers to destroy\n");
+			usage(1);
+		}
+		ecode = cmd_destroy_inum(sel_path, ac - 1,
+					 (const char **)(void *)&av[1]);
 	} else if (strcmp(av[0], "emergency-mode-enable") == 0) {
 		ecode = cmd_emergency_mode(sel_path, 1, ac - 1,
 					 (const char **)(void *)&av[1]);
@@ -274,6 +291,8 @@ main(int ac, char **av)
 		} else {
 			ecode = cmd_bulkfree(av[1]);
 		}
+	} else if (strcmp(av[0], "cleanup") == 0) {
+		ecode = cmd_cleanup(av[1]);	/* can be NULL */
 	} else {
 		fprintf(stderr, "Unrecognized command: %s\n", av[0]);
 		usage(1);
@@ -291,6 +310,12 @@ usage(int code)
 		"    -s path            Select filesystem\n"
 		"    -m mem[k,m,g]      buffer memory (bulkfree)\n"
 		"\n"
+		"    cleanup [<path>]                  "
+			"Run cleanup passes\n"
+		"    destroy <path>...                 "
+			"Destroy directory entries (only use if inode bad)\n"
+		"    destroy-inum <inum>...            "
+			"Destroy inodes (only use if inode bad)\n"
 		"    emergency-mode-enable <target>    "
 			"Enable emergency operations mode on filesystem\n"
 		"                                      "

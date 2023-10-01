@@ -45,7 +45,6 @@
 
 #include <fs/hammer2/hammer2_mount.h>
 
-static int mount_hammer2(int argc, char **argv);
 static void usage(const char *ctl, ...);
 
 static struct mntopt mopts[] = {
@@ -57,25 +56,21 @@ static struct mntopt mopts[] = {
 int
 main(int argc, char **argv)
 {
+	struct hammer2_mount_info args;
+	char canon_dev[MAXPATHLEN], canon_dir[MAXPATHLEN];
+	const char *errcause;
+	char *val, *p;
+	int ch, mntflags;
+
 	setprogname(argv[0]);
-	return mount_hammer2(argc, argv);
-}
 
-static void
-mount_hammer2_parseargs(int argc, char **argv,
-	struct hammer2_mount_info *args, int *mntflags,
-	char *canon_dev, char *canon_dir)
-{
-	char *tmp;
-	int ch;
-
-	memset(args, 0, sizeof(*args));
-	*mntflags = 0;
+	memset(&args, 0, sizeof(args));
+	mntflags = 0;
 	optind = optreset = 1; /* Reset for parse of new argv. */
 	while ((ch = getopt(argc, argv, "o:")) != -1) {
 		switch (ch) {
 		case 'o':
-			getmntopts(optarg, mopts, mntflags);
+			getmntopts(optarg, mopts, &mntflags);
 			break;
 		case '?':
 		default:
@@ -96,42 +91,30 @@ mount_hammer2_parseargs(int argc, char **argv,
 
 	/* Automatically add @DATA if no label specified. */
 	if (strchr(canon_dev, '@') == NULL) {
-		if (asprintf(&tmp, "%s@DATA", canon_dev) == -1)
+		if (asprintf(&val, "%s@DATA", canon_dev) == -1)
 			err(1, "asprintf");
-		strlcpy(canon_dev, tmp, MAXPATHLEN);
-		free(tmp);
+		strlcpy(canon_dev, val, MAXPATHLEN);
+		free(val);
 	}
 
 	/* Prefix if necessary. */
 	if (!strchr(canon_dev, ':') && canon_dev[0] != '/' &&
 	    canon_dev[0] != '@') {
-		if (asprintf(&tmp, "/dev/%s", canon_dev) == -1)
+		if (asprintf(&val, "/dev/%s", canon_dev) == -1)
 			err(1, "asprintf");
-		strlcpy(canon_dev, tmp, MAXPATHLEN);
-		free(tmp);
+		strlcpy(canon_dev, val, MAXPATHLEN);
+		free(val);
 	}
 
-	args->fspec = strcmp(argv[0], "") ? canon_dev : NULL;
-	args->hflags = HMNT2_LOCAL; /* force local, not optional */
+	args.fspec = strcmp(argv[0], "") ? canon_dev : NULL;
+	args.hflags = HMNT2_LOCAL; /* force local, not optional */
 
 #define DEFAULT_ROOTUID	-2
-	args->export_info.ex_root = DEFAULT_ROOTUID;
-	if ((*mntflags) & MNT_RDONLY)
-		args->export_info.ex_flags = MNT_EXRDONLY;
+	args.export_info.ex_root = DEFAULT_ROOTUID;
+	if (mntflags & MNT_RDONLY)
+		args.export_info.ex_flags = MNT_EXRDONLY;
 	else
-		args->export_info.ex_flags = 0;
-}
-
-static int
-mount_hammer2(int argc, char **argv)
-{
-	struct hammer2_mount_info args;
-	char canon_dev[MAXPATHLEN], canon_dir[MAXPATHLEN];
-	const char *errcause;
-	int mntflags;
-
-	mount_hammer2_parseargs(argc, argv, &args, &mntflags, canon_dev,
-	    canon_dir);
+		args.export_info.ex_flags = 0;
 
 	if (mount(MOUNT_HAMMER2, canon_dir, mntflags, &args) == -1) {
 		switch (errno) {

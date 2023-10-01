@@ -365,11 +365,16 @@ struct hammer2_chain {
  */
 #define HAMMER2_ERROR_EIO		0x00000001	/* device I/O error */
 #define HAMMER2_ERROR_CHECK		0x00000002	/* check code error */
+#define HAMMER2_ERROR_BADBREF		0x00000010	/* illegal bref */
 #define HAMMER2_ERROR_ENOSPC		0x00000020	/* allocation failure */
 #define HAMMER2_ERROR_ENOENT		0x00000040	/* entry not found */
+#define HAMMER2_ERROR_ENOTEMPTY		0x00000080	/* dir not empty */
 #define HAMMER2_ERROR_EAGAIN		0x00000100	/* retry */
+#define HAMMER2_ERROR_ENOTDIR		0x00000200	/* not directory */
+#define HAMMER2_ERROR_EISDIR		0x00000400	/* is directory */
 #define HAMMER2_ERROR_ABORTED		0x00001000	/* aborted operation */
 #define HAMMER2_ERROR_EOF		0x00002000	/* end of scan */
+#define HAMMER2_ERROR_EINVAL		0x00004000	/* catch-all */
 #define HAMMER2_ERROR_EOPNOTSUPP	0x10000000	/* unsupported */
 
 /*
@@ -659,6 +664,16 @@ struct hammer2_xop_lookup {
 	hammer2_key_t		lhc;
 };
 
+struct hammer2_xop_unlink {
+	hammer2_xop_head_t	head;
+	int			isdir;
+	int			dopermanent;
+};
+
+#define H2DOPERM_PERMANENT	0x01
+#define H2DOPERM_FORCE		0x02
+#define H2DOPERM_IGNINO		0x04
+
 struct hammer2_xop_bmap {
 	hammer2_xop_head_t	head;
 	daddr_t			lbn;
@@ -689,6 +704,7 @@ typedef struct hammer2_xop_ipcluster hammer2_xop_ipcluster_t;
 typedef struct hammer2_xop_readdir hammer2_xop_readdir_t;
 typedef struct hammer2_xop_nresolve hammer2_xop_nresolve_t;
 typedef struct hammer2_xop_lookup hammer2_xop_lookup_t;
+typedef struct hammer2_xop_unlink hammer2_xop_unlink_t;
 typedef struct hammer2_xop_bmap hammer2_xop_bmap_t;
 typedef struct hammer2_xop_fsync hammer2_xop_fsync_t;
 typedef struct hammer2_xop_flush hammer2_xop_flush_t;
@@ -700,6 +716,7 @@ union hammer2_xop {
 	hammer2_xop_readdir_t	xop_readdir;
 	hammer2_xop_nresolve_t	xop_nresolve;
 	hammer2_xop_lookup_t	xop_lookup;
+	hammer2_xop_unlink_t	xop_unlink;
 	hammer2_xop_bmap_t	xop_bmap;
 	hammer2_xop_fsync_t	xop_fsync;
 	hammer2_xop_flush_t	xop_flush;
@@ -797,6 +814,7 @@ struct hammer2_dev {
 	hammer2_volume_t	volumes[HAMMER2_MAX_VOLUMES]; /* list of volumes */
 	hammer2_off_t		total_size;	/* total size of volumes */
 	uint32_t		hflags;		/* HMNT2 flags applicable to device */
+	int			rdonly;		/* read-only mount */
 	int			mount_count;	/* number of actively mounted PFSs */
 	int			nvolumes;	/* total number of volumes */
 	int			volhdrno;	/* last volhdrno written */
@@ -847,6 +865,7 @@ struct hammer2_pfs {
 	uint8_t			pfs_types[HAMMER2_MAXCLUSTER];
 	hammer2_blockset_t	pfs_iroot_blocksets[HAMMER2_MAXCLUSTER];
 	int			flags;		/* for HAMMER2_PMPF_xxx */
+	int			rdonly;		/* read-only mount */
 	int			lru_count;	/* #of chains on LRU */
 	unsigned long		ipdep_mask;
 	hammer2_tid_t		modify_tid;	/* modify transaction id */
@@ -898,7 +917,9 @@ extern const struct vops hammer2_fifovops;
 extern hammer2_xop_desc_t hammer2_ipcluster_desc;
 extern hammer2_xop_desc_t hammer2_readdir_desc;
 extern hammer2_xop_desc_t hammer2_nresolve_desc;
+extern hammer2_xop_desc_t hammer2_unlink_desc;
 extern hammer2_xop_desc_t hammer2_lookup_desc;
+extern hammer2_xop_desc_t hammer2_delete_desc;
 extern hammer2_xop_desc_t hammer2_bmap_desc;
 extern hammer2_xop_desc_t hammer2_inode_chain_sync_desc;
 extern hammer2_xop_desc_t hammer2_inode_flush_desc;
@@ -1068,11 +1089,14 @@ int hammer2_vinit(struct mount *, struct vnode **);
 void hammer2_xop_ipcluster(hammer2_xop_t *, int);
 void hammer2_xop_readdir(hammer2_xop_t *, int);
 void hammer2_xop_nresolve(hammer2_xop_t *, int);
+void hammer2_xop_unlink(hammer2_xop_t *, int);
 void hammer2_xop_lookup(hammer2_xop_t *, int);
+void hammer2_xop_delete(hammer2_xop_t *, int);
 void hammer2_xop_bmap(hammer2_xop_t *, int);
 void hammer2_xop_inode_chain_sync(hammer2_xop_t *, int);
 void hammer2_xop_inode_flush(hammer2_xop_t *, int);
 
+/* XXX no way to return multiple errnos */
 static __inline int
 hammer2_error_to_errno(int error)
 {
@@ -1082,14 +1106,26 @@ hammer2_error_to_errno(int error)
 		return (EIO);
 	else if (error & HAMMER2_ERROR_CHECK)
 		return (EDOM);
+	else if (error & HAMMER2_ERROR_BADBREF)
+		return (EIO); /* no EBADBREF */
 	else if (error & HAMMER2_ERROR_ENOSPC)
 		return (ENOSPC);
 	else if (error & HAMMER2_ERROR_ENOENT)
 		return (ENOENT);
+	else if (error & HAMMER2_ERROR_ENOTEMPTY)
+		return (ENOTEMPTY);
 	else if (error & HAMMER2_ERROR_EAGAIN)
 		return (EAGAIN);
+	else if (error & HAMMER2_ERROR_ENOTDIR)
+		return (ENOTDIR);
+	else if (error & HAMMER2_ERROR_EISDIR)
+		return (EISDIR);
 	else if (error & HAMMER2_ERROR_ABORTED)
 		return (EINTR);
+	//else if (error & HAMMER2_ERROR_EOF)
+	//	return (xxx);
+	else if (error & HAMMER2_ERROR_EINVAL)
+		return (EINVAL);
 	else if (error & HAMMER2_ERROR_EOPNOTSUPP)
 		return (EOPNOTSUPP);
 	else
@@ -1099,8 +1135,38 @@ hammer2_error_to_errno(int error)
 static __inline int
 hammer2_errno_to_error(int error)
 {
-	KKASSERT(error);
-	return (EIO);
+	switch (error) {
+	case 0:
+		return (0);
+	case EIO:
+		return (HAMMER2_ERROR_EIO);
+	case EDOM:
+		return (HAMMER2_ERROR_CHECK);
+	//case EIO:
+	//	return (HAMMER2_ERROR_BADBREF);
+	case ENOSPC:
+		return (HAMMER2_ERROR_ENOSPC);
+	case ENOENT:
+		return (HAMMER2_ERROR_ENOENT);
+	case ENOTEMPTY:
+		return (HAMMER2_ERROR_ENOTEMPTY);
+	case EAGAIN:
+		return (HAMMER2_ERROR_EAGAIN);
+	case ENOTDIR:
+		return (HAMMER2_ERROR_ENOTDIR);
+	case EISDIR:
+		return HAMMER2_ERROR_EISDIR;
+	case EINTR:
+		return (HAMMER2_ERROR_ABORTED);
+	//case xxx:
+	//	return (HAMMER2_ERROR_EOF);
+	case EINVAL:
+		return (HAMMER2_ERROR_EINVAL);
+	case EOPNOTSUPP:
+		return (HAMMER2_ERROR_EOPNOTSUPP);
+	default:
+		return (HAMMER2_ERROR_EINVAL);
+	}
 }
 
 static __inline const hammer2_media_data_t *

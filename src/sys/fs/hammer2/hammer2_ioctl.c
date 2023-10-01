@@ -52,7 +52,7 @@ static int
 hammer2_is_rdonly(const struct mount *mp)
 {
 	if (mp->mnt_flag & MNT_RDONLY) {
-		hprintf("PFS read-only mounted\n");
+		hprintf("read-only mounted\n");
 		return (1);
 	}
 
@@ -465,6 +465,90 @@ failed:
 }
 
 /*
+ * Unconditionally delete meta-data in a hammer2 filesystem.
+ */
+static int
+hammer2_ioctl_destroy(hammer2_inode_t *ip, void *data)
+{
+#ifdef INVARIANTS
+	hammer2_ioc_destroy_t *iocd = data;
+	hammer2_pfs_t *pmp = ip->pmp;
+	int error;
+
+	if (pmp->rdonly)
+		return (EROFS);
+	if (hammer2_is_rdonly(ip->pmp->mp))
+		return (EROFS);
+
+	switch (iocd->cmd) {
+	case HAMMER2_DELETE_FILE:
+		/*
+		 * Destroy a bad directory entry by name.  Caller must
+		 * pass the directory as fd.
+		 */
+		{
+		hammer2_xop_unlink_t *xop;
+
+		if (iocd->path[sizeof(iocd->path)-1]) {
+			error = EINVAL;
+			break;
+		}
+		if (ip->meta.type != HAMMER2_OBJTYPE_DIRECTORY) {
+			error = EINVAL;
+			break;
+		}
+		/* hammer2_pfs_memory_wait(pmp); */
+		hammer2_trans_init(pmp, 0);
+		hammer2_inode_lock(ip, 0);
+
+		xop = hammer2_xop_alloc(ip, HAMMER2_XOP_MODIFYING);
+		hammer2_xop_setname(&xop->head, iocd->path, strlen(iocd->path));
+		xop->isdir = -1;
+		xop->dopermanent =
+		    H2DOPERM_PERMANENT | H2DOPERM_FORCE | H2DOPERM_IGNINO;
+		hammer2_xop_start(&xop->head, &hammer2_unlink_desc);
+		error = hammer2_xop_collect(&xop->head, 0);
+		error = hammer2_error_to_errno(error);
+
+		hammer2_inode_unlock(ip);
+		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+		hammer2_trans_done(pmp, HAMMER2_TRANS_SIDEQ);
+		}
+		break;
+	case HAMMER2_DELETE_INUM:
+		/* Destroy a bad inode by inode number. */
+		{
+		hammer2_xop_lookup_t *xop;
+
+		if (iocd->inum < 1) {
+			error = EINVAL;
+			break;
+		}
+		/* hammer2_pfs_memory_wait(pmp); */
+		hammer2_trans_init(pmp, 0);
+
+		xop = hammer2_xop_alloc(pmp->iroot, HAMMER2_XOP_MODIFYING);
+		xop->lhc = iocd->inum;
+		hammer2_xop_start(&xop->head, &hammer2_delete_desc);
+		error = hammer2_xop_collect(&xop->head, 0);
+		error = hammer2_error_to_errno(error);
+
+		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+		hammer2_trans_done(pmp, HAMMER2_TRANS_SIDEQ);
+		}
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+
+	return (error);
+#else
+	return (EOPNOTSUPP);
+#endif
+}
+
+/*
  * Grow a filesystem into its partition size.
  */
 static int
@@ -668,6 +752,9 @@ hammer2_ioctl_impl(hammer2_inode_t *ip, unsigned long com, void *data,
 		break;
 	case HAMMER2IOC_BULKFREE_SCAN:
 		error = hammer2_ioctl_bulkfree_scan(ip, data);
+		break;
+	case HAMMER2IOC_DESTROY:
+		error = hammer2_ioctl_destroy(ip, data);
 		break;
 	case HAMMER2IOC_GROWFS:
 		error = hammer2_ioctl_growfs(ip, data);

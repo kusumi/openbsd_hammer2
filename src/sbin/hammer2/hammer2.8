@@ -30,7 +30,7 @@
 .\" OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd September 18, 2023
+.Dd September 27, 2023
 .Dt HAMMER2 8
 .Os
 .Sh NAME
@@ -78,6 +78,27 @@ locally on the host in order to be able to issue commands for other PFSs
 on the filesystem.
 The mount also enables PFS configuration scanning for that filesystem.
 .Bl -tag -width indent
+.\" ==== cleanup ====
+.It Cm cleanup Op path
+Perform manual cleanup passes on paths or all mounted partitions.
+.\" ==== destroy ====
+.It Cm destroy Ar path...
+Destroy the specified directory entry in a hammer2 filesystem.
+This bypasses
+all normal checks and will unconditionally destroy the directory entry.
+The underlying inode is not checked and, if it does exist, its nlinks count
+is not decremented.
+This directive should only be used to destroy a corrupted directory entry
+which no longer has a working inode.
+Unsupported unless INVARIANTS is enabled.
+.Pp
+Note that this command may desynchronize the system namecache for the
+specified entry.
+If this happens, you may have to unmount and remount the filesystem.
+.\" ==== destroy-inum ====
+.It Cm destroy-inum Ar path...
+Destroy the specified inode in a hammer2 filesystem.
+Unsupported unless INVARIANTS is enabled.
 .\" ==== emergency-mode-enable ===
 .It Cm emergency-mode-enable Ar target
 Flag emergency operations mode in the filesystem.
@@ -221,6 +242,7 @@ Dump inode.
 .\" ==== dumpchain ====
 .It Cm dumpchain Op path Op chnflags
 Dump in-memory chain topology.
+Unsupported unless INVARIANTS is enabled.
 .Sh SEE ALSO
 .Xr mount_hammer2 8 ,
 .Xr newfs_hammer2 8
