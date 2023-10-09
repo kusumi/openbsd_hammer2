@@ -67,6 +67,7 @@
 #define atomic_set_int		atomic_setbits_int
 #define atomic_clear_int	atomic_clearbits_int
 
+#define atomic_set_32		atomic_set_int
 #define atomic_add_32		atomic_add_int
 
 #define atomic_cmpset_int(ptr, old, new)	\

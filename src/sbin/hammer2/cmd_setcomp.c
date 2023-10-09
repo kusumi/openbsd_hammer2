@@ -58,7 +58,7 @@ cmd_setcomp(const char *comp_str, char **paths)
 	s2 = s1 ? strtok(NULL, ":") : NULL;
 	ecode = 0;
 
-	if (isdigit(s1[0])) {
+	if (isdigit((int)s1[0])) {
 		comp_algo = strtol(s1, NULL, 0);
 	} else {
 		comp_algo = HAMMER2_COMP_STRINGS_COUNT;
@@ -81,7 +81,7 @@ cmd_setcomp(const char *comp_str, char **paths)
 	}
 	if (s2 == NULL) {
 		comp_level = 0;
-	} else if (isdigit(s2[0])) {
+	} else if (isdigit((int)s2[0])) {
 		comp_level = strtol(s2, NULL, 0);
 	} else if (strcasecmp(s2, "default") == 0) {
 		comp_level = 0;

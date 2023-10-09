@@ -148,6 +148,7 @@ hammer2_ioctl_pfs_get(hammer2_inode_t *ip, void *data)
 		KKASSERT(ripdata->meta.name_len < sizeof(pfs->name));
 		bcopy(ripdata->filename, pfs->name, ripdata->meta.name_len);
 		pfs->name[ripdata->meta.name_len] = 0;
+		ripdata = NULL; /* safety */
 
 		/*
 		 * Calculate name_next, if any.  We are only accessing
@@ -246,6 +247,338 @@ hammer2_ioctl_pfs_lookup(hammer2_inode_t *ip, void *data)
 	hammer2_inode_unlock(hmp->spmp->iroot);
 
 	return (error);
+}
+
+/*
+ * Create a new PFS under the super-root.
+ */
+static int
+hammer2_ioctl_pfs_create(hammer2_inode_t *ip, void *data)
+{
+	hammer2_inode_data_t *nipdata;
+	hammer2_chain_t *nchain;
+	hammer2_dev_t *hmp, *force_local;
+	hammer2_ioc_pfs_t *pfs = data;
+	hammer2_inode_t *nip = NULL;
+	hammer2_tid_t mtid;
+	int error;
+
+	hmp = ip->pmp->pfs_hmps[0];
+	if (hmp == NULL)
+		return (EINVAL);
+
+	if (pfs->name[0] == 0)
+		return (EINVAL);
+	pfs->name[sizeof(pfs->name) - 1] = 0;
+
+	if (hammer2_is_rdonly(ip->pmp->mp))
+		return (EROFS);
+
+	if (hammer2_ioctl_pfs_lookup(ip, pfs) == 0)
+		return (EEXIST);
+
+	hammer2_trans_init(hmp->spmp, HAMMER2_TRANS_ISFLUSH);
+	mtid = hammer2_trans_sub(hmp->spmp);
+	nip = hammer2_inode_create_pfs(hmp->spmp, pfs->name, strlen(pfs->name),
+	    &error);
+	if (error == 0) {
+		atomic_set_int(&nip->flags, HAMMER2_INODE_NOSIDEQ);
+		hammer2_inode_modify(nip);
+		nchain = hammer2_inode_chain(nip, 0, HAMMER2_RESOLVE_ALWAYS);
+		error = hammer2_chain_modify(nchain, mtid, 0, 0);
+		KKASSERT(error == 0);
+		nipdata = &nchain->data->ipdata;
+
+		nip->meta.pfs_type = pfs->pfs_type;
+		nip->meta.pfs_subtype = pfs->pfs_subtype;
+		nip->meta.pfs_clid = pfs->pfs_clid;
+		nip->meta.pfs_fsid = pfs->pfs_fsid;
+		nip->meta.op_flags |= HAMMER2_OPFLAG_PFSROOT;
+
+		/*
+		 * Set default compression and check algorithm.  This
+		 * can be changed later.
+		 *
+		 * Do not allow compression on PFS's with the special name
+		 * "boot", the boot loader can't decompress (yet).
+		 */
+		nip->meta.comp_algo =
+		    HAMMER2_ENC_ALGO(HAMMER2_COMP_NEWFS_DEFAULT);
+		nip->meta.check_algo =
+		    HAMMER2_ENC_ALGO( HAMMER2_CHECK_XXHASH64);
+
+		//if (strcasecmp(pfs->name, "boot") == 0)
+		if (strcmp(pfs->name, "boot") == 0 ||
+		    strcmp(pfs->name, "BOOT") == 0)
+			nip->meta.comp_algo =
+			    HAMMER2_ENC_ALGO(HAMMER2_COMP_AUTOZERO);
+
+		/* Super-root isn't mounted, fsync it. */
+		hammer2_chain_unlock(nchain);
+		hammer2_inode_ref(nip);
+		hammer2_inode_unlock(nip);
+		hammer2_inode_chain_sync(nip);
+		hammer2_inode_chain_flush(nip,
+		    HAMMER2_XOP_INODE_STOP | HAMMER2_XOP_FSSYNC);
+		hammer2_inode_drop(nip);
+		/* nip is dead */
+
+		/*
+		 * We still have a ref on the chain, relock and associate
+		 * with an appropriate PFS.
+		 */
+		force_local = (hmp->hflags & HMNT2_LOCAL) ? hmp : NULL;
+
+		hammer2_chain_lock(nchain, HAMMER2_RESOLVE_ALWAYS);
+		nipdata = &nchain->data->ipdata;
+		debug_hprintf("ADD LOCAL PFS (IOCTL): %s\n", nipdata->filename);
+		hammer2_pfsalloc(nchain, nipdata, force_local);
+
+		hammer2_chain_unlock(nchain);
+		hammer2_chain_drop(nchain);
+	}
+	hammer2_trans_done(hmp->spmp,
+	    HAMMER2_TRANS_ISFLUSH | HAMMER2_TRANS_SIDEQ);
+
+	return (error);
+}
+
+/*
+ * Destroy an existing PFS under the super-root.
+ */
+static int
+hammer2_ioctl_pfs_delete(hammer2_inode_t *ip, void *data)
+{
+	hammer2_ioc_pfs_t *pfs = data;
+	hammer2_dev_t *hmp;
+	hammer2_pfs_t *spmp, *pmp;
+	hammer2_xop_unlink_t *xop;
+	hammer2_inode_t *dip;
+	int error, i;
+
+	/*
+	 * The PFS should be probed, so we should be able to
+	 * locate it.  We only delete the PFS from the
+	 * specific H2 block device (hmp), not all of
+	 * them.  We must remove the PFS from the cluster
+	 * before we can destroy it.
+	 */
+	hmp = ip->pmp->pfs_hmps[0];
+	if (hmp == NULL)
+		return (EINVAL);
+
+	if (pfs->name[0] == 0)
+		return (EINVAL);
+	pfs->name[sizeof(pfs->name) - 1] = 0;
+
+	if (hammer2_is_rdonly(ip->pmp->mp))
+		return (EROFS);
+
+	hammer2_lk_ex(&hammer2_mntlk);
+
+	TAILQ_FOREACH(pmp, &hammer2_pfslist, mntentry) {
+		for (i = 0; i < HAMMER2_MAXCLUSTER; ++i) {
+			if (pmp->pfs_hmps[i] != hmp)
+				continue;
+			if (pmp->pfs_names[i] &&
+			    strcmp(pmp->pfs_names[i], pfs->name) == 0)
+				break;
+		}
+		if (i != HAMMER2_MAXCLUSTER)
+			break;
+	}
+
+	if (pmp == NULL) {
+		hammer2_lk_unlock(&hammer2_mntlk);
+		return (ENOENT);
+	}
+	if (pmp->mp) {
+		hammer2_lk_unlock(&hammer2_mntlk);
+		return (EBUSY);
+	}
+
+	/*
+	 * Ok, we found the pmp and we have the index.  Permanently remove
+	 * the PFS from the cluster.
+	 */
+	debug_hprintf("FOUND PFS %s CLINDEX %d\n", pfs->name, i);
+	hammer2_pfsdealloc(pmp, i, 1);
+
+	hammer2_lk_unlock(&hammer2_mntlk);
+
+	/*
+	 * Now destroy the PFS under its device using the per-device
+	 * super-root.
+	 */
+	spmp = hmp->spmp;
+	dip = spmp->iroot;
+	hammer2_trans_init(spmp, 0);
+	hammer2_inode_lock(dip, 0);
+
+	xop = hammer2_xop_alloc(dip, HAMMER2_XOP_MODIFYING);
+	hammer2_xop_setname(&xop->head, pfs->name, strlen(pfs->name));
+	xop->isdir = 2;
+	xop->dopermanent = H2DOPERM_PERMANENT | H2DOPERM_FORCE;
+	hammer2_xop_start(&xop->head, &hammer2_unlink_desc);
+	error = hammer2_xop_collect(&xop->head, 0);
+	error = hammer2_error_to_errno(error);
+
+	hammer2_inode_unlock(dip);
+	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+	hammer2_trans_done(spmp, HAMMER2_TRANS_SIDEQ);
+
+	return (error);
+}
+
+static void
+_uuidgen(struct uuid *u)
+{
+	arc4random_buf(u, sizeof(*u));
+
+	u->clock_seq_hi_and_reserved &= ~(1 << 6);
+	u->clock_seq_hi_and_reserved |= (1 << 7);
+
+	u->time_hi_and_version &= ~(1 << 12);
+	u->time_hi_and_version &= ~(1 << 13);
+	u->time_hi_and_version |= (1 << 14);
+	u->time_hi_and_version &= ~(1 << 15);
+}
+
+static int
+hammer2_ioctl_pfs_snapshot(hammer2_inode_t *ip, void *data)
+{
+	hammer2_ioc_pfs_t *pfs = data;
+	hammer2_dev_t *hmp, *force_local;
+	hammer2_pfs_t *pmp;
+	hammer2_chain_t *chain, *nchain;
+	hammer2_inode_t *nip;
+	hammer2_inode_data_t *wipdata;
+	hammer2_tid_t mtid, starting_inum;
+	int error;
+
+	pmp = ip->pmp;
+	ip = pmp->iroot;
+
+	hmp = pmp->pfs_hmps[0];
+	if (hmp == NULL)
+		return (EINVAL);
+
+	if (pfs->name[0] == 0)
+		return (EINVAL);
+	pfs->name[sizeof(pfs->name) - 1] = 0;
+
+	if (hammer2_is_rdonly(ip->pmp->mp))
+		return (EROFS);
+
+	hammer2_lk_ex(&hmp->bulklk);
+
+	/*
+	 * NOSYNC is for debugging.  We skip the filesystem sync and use
+	 * a normal transaction (which is less likely to stall).  used for
+	 * testing filesystem consistency.
+	 *
+	 * In normal mode we sync the filesystem and use a flush transaction.
+	 */
+	if (pfs->pfs_flags & HAMMER2_PFSFLAGS_NOSYNC) {
+		hammer2_trans_init(pmp, 0);
+	} else {
+		hammer2_sync(pmp->mp, MNT_WAIT, 0, NULL, NULL);
+		hammer2_trans_init(pmp, HAMMER2_TRANS_ISFLUSH);
+	}
+	mtid = hammer2_trans_sub(pmp);
+	hammer2_inode_lock(ip, 0);
+	hammer2_inode_modify(ip);
+	ip->meta.pfs_lsnap_tid = mtid;
+
+	chain = hammer2_inode_chain(ip, 0, HAMMER2_RESOLVE_ALWAYS);
+	hmp = chain->hmp;
+
+	/*
+	 * Create the snapshot directory under the super-root.
+	 *
+	 * Set PFS type, generate a unique filesystem id, and generate
+	 * a cluster id.  Use the same clid when snapshotting a PFS root,
+	 * which theoretically allows the snapshot to be used as part of
+	 * the same cluster (perhaps as a cache).
+	 *
+	 * Note that pfs_lsnap_tid must be set in the snapshot as well,
+	 * ensuring that any nocrc/nocomp file data modifications force
+	 * a copy-on-write.
+	 *
+	 * Copy the (flushed) blockref array.  Theoretically we could use
+	 * chain_duplicate() but it becomes difficult to disentangle
+	 * the shared core so for now just brute-force it.
+	 */
+	hammer2_chain_unlock(chain);
+	nip = hammer2_inode_create_pfs(hmp->spmp, pfs->name, strlen(pfs->name),
+	    &error);
+	hammer2_chain_lock(chain, HAMMER2_RESOLVE_ALWAYS);
+
+	if (nip) {
+		atomic_set_int(&nip->flags, HAMMER2_INODE_NOSIDEQ);
+		hammer2_inode_modify(nip);
+		nchain = hammer2_inode_chain(nip, 0, HAMMER2_RESOLVE_ALWAYS);
+		error = hammer2_chain_modify(nchain, mtid, 0, 0);
+		KKASSERT(error == 0);
+		wipdata = &nchain->data->ipdata;
+
+		starting_inum = ip->pmp->inode_tid + 1;
+		nip->meta.pfs_inum = starting_inum;
+		nip->meta.pfs_type = HAMMER2_PFSTYPE_MASTER;
+		nip->meta.pfs_subtype = HAMMER2_PFSSUBTYPE_SNAPSHOT;
+		nip->meta.op_flags |= HAMMER2_OPFLAG_PFSROOT;
+		nip->meta.pfs_lsnap_tid = mtid;
+		nchain->bref.embed.stats = chain->bref.embed.stats;
+
+		_uuidgen(&nip->meta.pfs_fsid);
+		_uuidgen(&nip->meta.pfs_clid);
+		nchain->bref.flags |= HAMMER2_BREF_FLAG_PFSROOT;
+
+		/* XXX hack blockset copy */
+		/* XXX doesn't work with real cluster */
+		wipdata->meta = nip->meta;
+		hammer2_spin_ex(&pmp->inum_spin);
+		wipdata->u.blockset = pmp->pfs_iroot_blocksets[0];
+		hammer2_spin_unex(&pmp->inum_spin);
+
+		KKASSERT(wipdata == &nchain->data->ipdata);
+
+		hammer2_chain_unlock(nchain);
+		hammer2_inode_ref(nip);
+		hammer2_inode_unlock(nip);
+		hammer2_inode_chain_sync(nip);
+		hammer2_inode_chain_flush(nip,
+		    HAMMER2_XOP_INODE_STOP | HAMMER2_XOP_FSSYNC);
+		    /* XXX | HAMMER2_XOP_VOLHDR */
+		hammer2_inode_drop(nip);
+		/* nip is dead */
+
+		force_local = (hmp->hflags & HMNT2_LOCAL) ? hmp : NULL;
+
+		hammer2_chain_lock(nchain, HAMMER2_RESOLVE_ALWAYS);
+		wipdata = &nchain->data->ipdata;
+		debug_hprintf("SNAPSHOT LOCAL PFS (IOCTL): %s\n",
+		    wipdata->filename);
+		hammer2_pfsalloc(nchain, wipdata, force_local);
+		nchain->pmp->inode_tid = starting_inum;
+
+		hammer2_chain_unlock(nchain);
+		hammer2_chain_drop(nchain);
+	}
+
+	hammer2_chain_unlock(chain);
+	hammer2_chain_drop(chain);
+
+	hammer2_inode_unlock(ip);
+	if (pfs->pfs_flags & HAMMER2_PFSFLAGS_NOSYNC)
+		hammer2_trans_done(pmp, 0);
+	else
+		hammer2_trans_done(pmp,
+		    HAMMER2_TRANS_ISFLUSH | HAMMER2_TRANS_SIDEQ);
+
+	hammer2_lk_unlock(&hmp->bulklk);
+
+	return (hammer2_error_to_errno(error));
 }
 
 /*
@@ -404,10 +737,10 @@ hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
 	 * Bulkfree has to be serialized to guarantee at least one sync
 	 * inbetween bulkfrees.
 	 */
-	rw_enter_write(&hmp->bflk);
+	hammer2_lk_ex(&hmp->bflk);
 
 	/* Sync all mounts related to the media. */
-	rw_enter_write(&hammer2_mntlk);
+	hammer2_lk_ex(&hammer2_mntlk);
 	TAILQ_FOREACH(pmp, &hammer2_pfslist, mntentry) {
 		for (i = 0; i < HAMMER2_MAXCLUSTER; ++i) {
 			if (pmp->pfs_hmps[i] != hmp)
@@ -418,7 +751,7 @@ hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
 			break;
 		}
 	}
-	rw_exit_write(&hammer2_mntlk);
+	hammer2_lk_unlock(&hammer2_mntlk);
 
 	if (error && error != ENOSPC)
 		goto failed;
@@ -460,7 +793,7 @@ hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
 	error = hammer2_error_to_errno(error);
 
 failed:
-	rw_exit_write(&hmp->bflk);
+	hammer2_lk_unlock(&hmp->bflk);
 	return (error);
 }
 
@@ -497,7 +830,6 @@ hammer2_ioctl_destroy(hammer2_inode_t *ip, void *data)
 			error = EINVAL;
 			break;
 		}
-		/* hammer2_pfs_memory_wait(pmp); */
 		hammer2_trans_init(pmp, 0);
 		hammer2_inode_lock(ip, 0);
 
@@ -524,7 +856,6 @@ hammer2_ioctl_destroy(hammer2_inode_t *ip, void *data)
 			error = EINVAL;
 			break;
 		}
-		/* hammer2_pfs_memory_wait(pmp); */
 		hammer2_trans_init(pmp, 0);
 
 		xop = hammer2_xop_alloc(pmp->iroot, HAMMER2_XOP_MODIFYING);
@@ -737,6 +1068,15 @@ hammer2_ioctl_impl(hammer2_inode_t *ip, unsigned long com, void *data,
 		break;
 	case HAMMER2IOC_PFS_LOOKUP:
 		error = hammer2_ioctl_pfs_lookup(ip, data);
+		break;
+	case HAMMER2IOC_PFS_CREATE:
+		error = hammer2_ioctl_pfs_create(ip, data);
+		break;
+	case HAMMER2IOC_PFS_DELETE:
+		error = hammer2_ioctl_pfs_delete(ip, data);
+		break;
+	case HAMMER2IOC_PFS_SNAPSHOT:
+		error = hammer2_ioctl_pfs_snapshot(ip, data);
 		break;
 	case HAMMER2IOC_INODE_GET:
 		error = hammer2_ioctl_inode_get(ip, data);

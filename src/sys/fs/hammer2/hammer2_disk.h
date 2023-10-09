@@ -910,11 +910,18 @@ typedef struct hammer2_inode_data hammer2_inode_data_t;
  * PFS types identify the role of a PFS within a cluster.
  */
 #define HAMMER2_PFSTYPE_NONE		0x00
+#define HAMMER2_PFSTYPE_CACHE		0x01
+#define HAMMER2_PFSTYPE_SLAVE		0x03
+#define HAMMER2_PFSTYPE_SOFT_SLAVE	0x04
+#define HAMMER2_PFSTYPE_SOFT_MASTER	0x05
 #define HAMMER2_PFSTYPE_MASTER		0x06
 #define HAMMER2_PFSTYPE_SUPROOT		0x08
+#define HAMMER2_PFSTYPE_DUMMY		0x09
 #define HAMMER2_PFSTYPE_MAX		16
 
 #define HAMMER2_PFSSUBTYPE_NONE		0
+#define HAMMER2_PFSSUBTYPE_SNAPSHOT	1	/* manual/managed snapshot */
+#define HAMMER2_PFSSUBTYPE_AUTOSNAP	2	/* automatic snapshot */
 
 /*
  * The volume header eats a 64K block at the beginning of each 2GB zone

@@ -150,3 +150,137 @@ cmd_pfs_getid(const char *sel_path, const char *name, int privateid)
 	close(fd);
 	return (ecode);
 }
+
+int
+cmd_pfs_create(const char *sel_path, const char *name,
+	       uint8_t pfs_type, const char *uuid_str)
+{
+	hammer2_ioc_pfs_t pfs;
+	int ecode = 0;
+	int fd;
+	uint32_t status;
+
+	/*
+	 * Default to MASTER if no uuid was specified.
+	 * Default to SLAVE if a uuid was specified.
+	 *
+	 * When adding masters to a cluster, the new PFS must be added as
+	 * a slave and then upgraded to ensure proper synchronization.
+	 */
+	if (pfs_type == HAMMER2_PFSTYPE_NONE) {
+		if (uuid_str)
+			pfs_type = HAMMER2_PFSTYPE_SLAVE;
+		else
+			pfs_type = HAMMER2_PFSTYPE_MASTER;
+	}
+
+	if ((fd = hammer2_ioctl_handle(sel_path)) < 0)
+		return(1);
+	bzero(&pfs, sizeof(pfs));
+	snprintf(pfs.name, sizeof(pfs.name), "%s", name);
+	pfs.pfs_type = pfs_type;
+	if (uuid_str) {
+		uuid_from_string(uuid_str, &pfs.pfs_clid, &status);
+	} else {
+		uuid_create(&pfs.pfs_clid, &status);
+	}
+	if (status == uuid_s_ok)
+		uuid_create(&pfs.pfs_fsid, &status);
+	if (status == uuid_s_ok) {
+		if (ioctl(fd, HAMMER2IOC_PFS_CREATE, &pfs) < 0) {
+			if (errno == EEXIST) {
+				fprintf(stderr,
+					"NOTE: Typically the same name is "
+					"used for cluster elements on "
+					"different mounts,\n"
+					"      but cluster elements on the "
+					"same mount require unique names.\n"
+					"hammer2: pfs_create(%s): already present\n",
+					name);
+			} else {
+				fprintf(stderr, "hammer2: pfs_create(%s): %s\n",
+				       name, strerror(errno));
+			}
+			ecode = 1;
+		} else {
+			printf("hammer2: pfs_create(%s): SUCCESS\n", name);
+		}
+	} else {
+		fprintf(stderr, "hammer2: pfs_create(%s): badly formed uuid\n",
+			name);
+		ecode = 1;
+	}
+	close(fd);
+	return (ecode);
+}
+
+int
+cmd_pfs_delete(const char *sel_path, char **av, int ac)
+{
+	hammer2_ioc_pfs_t pfs;
+	int ecode = 0;
+	int fd;
+	int i;
+	int n;
+	int use_fd;
+	int nmnts = 0;
+	char **mnts = NULL;
+
+	if (sel_path == NULL)
+		mnts = get_hammer2_mounts(&nmnts);
+
+	for (i = 1; i < ac; ++i) {
+		int enoents = 0;
+		bzero(&pfs, sizeof(pfs));
+		snprintf(pfs.name, sizeof(pfs.name), "%s", av[i]);
+
+		if (sel_path) {
+			use_fd = hammer2_ioctl_handle(sel_path);
+		} else {
+			use_fd = -1;
+			for (n = 0; n < nmnts; ++n) {
+				if ((fd = hammer2_ioctl_handle(mnts[n])) < 0) {
+					enoents++;
+					continue;
+				}
+				if (ioctl(fd, HAMMER2IOC_PFS_LOOKUP, &pfs) < 0) {
+					enoents++;
+					continue;
+				}
+				if (use_fd >= 0) {
+					fprintf(stderr,
+						"hammer2: pfs_delete(%s): "
+						"Duplicate PFS name, "
+						"must specify mount\n",
+						av[i]);
+					close(use_fd);
+					use_fd = -1;
+					break;
+				}
+				use_fd = fd;
+			}
+		}
+		if (use_fd >= 0) {
+			if (ioctl(use_fd, HAMMER2IOC_PFS_DELETE, &pfs) < 0) {
+				printf("hammer2: pfs_delete(%s): %s\n",
+				       av[i], strerror(errno));
+				ecode = 1;
+			} else {
+				printf("hammer2: pfs_delete(%s): SUCCESS\n",
+				       av[i]);
+			}
+			close(use_fd);
+		} else {
+			if (enoents == nmnts)
+				printf("hammer2: pfs_delete(%s): %s not found\n",
+				       av[i], av[i]);
+			else
+				printf("hammer2: pfs_delete(%s): FAILED\n",
+				       av[i]);
+			ecode = 1;
+		}
+	}
+	if (mnts)
+		put_hammer2_mounts(nmnts, mnts);
+	return (ecode);
+}

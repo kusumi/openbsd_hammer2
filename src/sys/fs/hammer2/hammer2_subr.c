@@ -230,6 +230,12 @@ hammer2_get_logical(void)
 	return (hammer2_calc_logical(NULL, 0, NULL, NULL));
 }
 
+void
+hammer2_update_time(uint64_t *timep)
+{
+	*timep = (uint64_t)gettime();
+}
+
 /*
  * Increment iostat, usually without any lock taken.
  */

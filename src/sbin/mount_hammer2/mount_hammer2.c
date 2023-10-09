@@ -107,7 +107,6 @@ main(int argc, char **argv)
 	}
 
 	args.fspec = strcmp(argv[0], "") ? canon_dev : NULL;
-	args.hflags = HMNT2_LOCAL; /* force local, not optional */
 
 #define DEFAULT_ROOTUID	-2
 	args.export_info.ex_root = DEFAULT_ROOTUID;

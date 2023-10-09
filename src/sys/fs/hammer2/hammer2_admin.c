@@ -47,8 +47,10 @@ H2XOPDESCRIPTOR(ipcluster);
 H2XOPDESCRIPTOR(readdir);
 H2XOPDESCRIPTOR(nresolve);
 H2XOPDESCRIPTOR(unlink);
+H2XOPDESCRIPTOR(scanlhc);
 H2XOPDESCRIPTOR(lookup);
 H2XOPDESCRIPTOR(delete);
+H2XOPDESCRIPTOR(inode_create);
 H2XOPDESCRIPTOR(bmap);
 H2XOPDESCRIPTOR(inode_chain_sync);
 H2XOPDESCRIPTOR(inode_flush);
@@ -213,14 +215,14 @@ hammer2_xop_start(hammer2_xop_head_t *xop, hammer2_xop_desc_t *desc)
 	xop->desc = desc;
 
 	for (i = 0; i < ip->cluster.nchains; ++i) {
-		if (ip->cluster.array[i].chain) {
-			atomic_set_int(&xop->run_mask, 1LLU << i);
-			atomic_set_int(&xop->chk_mask, 1LLU << i);
-		}
-	}
-
-	for (i = 0; i < ip->cluster.nchains; ++i) {
 		mask = 1LLU << i;
+		if (ip->cluster.array[i].chain) {
+			atomic_set_32(&xop->run_mask, mask);
+			atomic_set_32(&xop->chk_mask, mask);
+		} else {
+			continue;
+		}
+
 		if (hammer2_xop_active(xop)) {
 			mtx = &pmp->xop_lock[ip->ipdep_idx];
 			cv = pmp->xop_cv[ip->ipdep_idx];
@@ -258,7 +260,8 @@ hammer2_xop_retire(hammer2_xop_head_t *xop, uint32_t mask)
 	int i;
 
 	/* Remove the frontend collector or remove a backend feeder. */
-	KASSERTMSG(xop->run_mask & mask, "%x vs %x", xop->run_mask, mask);
+	KASSERTMSG(xop->run_mask & mask,
+	    "run_mask %x vs mask %x", xop->run_mask, mask);
 	omask = atomic_fetchadd_32(&xop->run_mask, -mask);
 
 	/* More than one entity left. */

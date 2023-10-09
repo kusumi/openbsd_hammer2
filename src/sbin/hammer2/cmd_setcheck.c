@@ -51,7 +51,7 @@ cmd_setcheck(const char *check_str, char **paths)
 
 	ecode = 0;
 
-	if (isdigit(check_str[0])) {
+	if (isdigit((int)check_str[0])) {
 		check_algo = strtol(check_str, NULL, 0);
 	} else {
 		check_algo = HAMMER2_CHECK_STRINGS_COUNT;

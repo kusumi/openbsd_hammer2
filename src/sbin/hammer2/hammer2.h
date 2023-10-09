@@ -92,6 +92,11 @@ extern size_t MemOpt;
  */
 int cmd_pfs_getid(const char *sel_path, const char *name, int privateid);
 int cmd_pfs_list(int ac, char **av);
+int cmd_pfs_create(const char *sel_path, const char *name,
+			uint8_t pfs_type, const char *uuid_str);
+int cmd_pfs_delete(const char *sel_path, char **av, int ac);
+int cmd_pfs_snapshot(const char *sel_path, const char *name, const char *label,
+			uint32_t pfs_flags);
 int cmd_hash(int ac, const char **av);
 int cmd_dhash(int ac, const char **av);
 int cmd_info(int ac, const char **av);

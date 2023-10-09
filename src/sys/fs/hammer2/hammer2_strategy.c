@@ -214,6 +214,8 @@ hammer2_xop_strategy_read(hammer2_xop_t *arg, int clindex)
 		hammer2_chain_unlock(parent);
 		hammer2_chain_drop(parent);
 	}
+	chain = NULL; /* safety */
+	parent = NULL; /* safety */
 
 	bp = xop->bp;
 	error = hammer2_xop_collect(&xop->head, HAMMER2_XOP_COLLECT_NOWAIT);

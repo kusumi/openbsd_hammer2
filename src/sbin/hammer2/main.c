@@ -57,7 +57,9 @@ int
 main(int ac, char **av)
 {
 	char *sel_path = NULL;
+	const char *uuid_str = NULL;
 	char *opt;
+	int pfs_type = HAMMER2_PFSTYPE_NONE;
 	int ecode = 0;
 	int ch;
 
@@ -94,6 +96,34 @@ main(int ac, char **av)
 			break;
 		case 's':
 			sel_path = strdup(optarg);
+			break;
+		case 't':
+			/*
+			 * set node type for pfs-create
+			 */
+			if (strcasecmp(optarg, "CACHE") == 0) {
+				pfs_type = HAMMER2_PFSTYPE_CACHE;
+			} else if (strcasecmp(optarg, "DUMMY") == 0) {
+				pfs_type = HAMMER2_PFSTYPE_DUMMY;
+			} else if (strcasecmp(optarg, "SLAVE") == 0) {
+				pfs_type = HAMMER2_PFSTYPE_SLAVE;
+			} else if (strcasecmp(optarg, "SOFT_SLAVE") == 0) {
+				pfs_type = HAMMER2_PFSTYPE_SOFT_SLAVE;
+			} else if (strcasecmp(optarg, "SOFT_MASTER") == 0) {
+				pfs_type = HAMMER2_PFSTYPE_SOFT_MASTER;
+			} else if (strcasecmp(optarg, "MASTER") == 0) {
+				pfs_type = HAMMER2_PFSTYPE_MASTER;
+			} else {
+				fprintf(stderr, "-t: Unrecognized node type\n");
+				usage(1);
+			}
+			break;
+		case 'u':
+			/*
+			 * set uuid for pfs-create, else one will be generated
+			 * (required for all except the MASTER node_type)
+			 */
+			uuid_str = optarg;
 			break;
 		case 'v':
 			if (QuietOpt)
@@ -191,6 +221,50 @@ main(int ac, char **av)
 					     (char **)(void *)&av[1]);
 		} else {
 			ecode = cmd_pfs_list(1, &sel_path);
+		}
+	} else if (strcmp(av[0], "pfs-create") == 0) {
+		/*
+		 * Create new PFS using pfs_type
+		 */
+		if (ac < 2) {
+			fprintf(stderr, "pfs-create: requires name\n");
+			usage(1);
+		}
+		ecode = cmd_pfs_create(sel_path, av[1], pfs_type, uuid_str);
+	} else if (strcmp(av[0], "pfs-delete") == 0) {
+		/*
+		 * Delete a PFS by name
+		 */
+		if (ac < 2) {
+			fprintf(stderr, "pfs-delete: requires name\n");
+			usage(1);
+		}
+		ecode = cmd_pfs_delete(sel_path, av, ac);
+	} else if (strcmp(av[0], "snapshot") == 0 ||
+		   strcmp(av[0], "snapshot-debug") == 0) {
+		/*
+		 * Create snapshot with optional pfs-type and optional
+		 * label override.
+		 */
+		uint32_t flags = 0;
+
+		if (strcmp(av[0], "snapshot-debug") == 0)
+			flags = HAMMER2_PFSFLAGS_NOSYNC;
+
+		if (ac > 3) {
+			fprintf(stderr, "%s: too many arguments\n", av[0]);
+			usage(1);
+		}
+		switch(ac) {
+		case 1:
+			ecode = cmd_pfs_snapshot(sel_path, NULL, NULL, flags);
+			break;
+		case 2:
+			ecode = cmd_pfs_snapshot(sel_path, av[1], NULL, flags);
+			break;
+		case 3:
+			ecode = cmd_pfs_snapshot(sel_path, av[1], av[2], flags);
+			break;
 		}
 	} else if (strcmp(av[0], "stat") == 0) {
 		ecode = cmd_stat(ac - 1, (const char **)(void *)&av[1]);
@@ -308,6 +382,8 @@ usage(int code)
 	fprintf(stderr,
 		"hammer2 [options] command [argument ...]\n"
 		"    -s path            Select filesystem\n"
+		"    -t type            PFS type for pfs-create\n"
+		"    -u uuid            uuid for pfs-create\n"
 		"    -m mem[k,m,g]      buffer memory (bulkfree)\n"
 		"\n"
 		"    cleanup [<path>]                  "
@@ -332,6 +408,14 @@ usage(int code)
 			"Print cluster id for specific PFS\n"
 		"    pfs-fsid <label>                  "
 			"Print private id for specific PFS\n"
+		"    pfs-create <label>                "
+			"Create a PFS\n"
+		"    pfs-delete <label>                "
+			"Destroy a PFS\n"
+		"    snapshot <path> [<label>]         "
+			"Snapshot a PFS or directory\n"
+		"    snapshot-debug <path> [<label>]   "
+			"Snapshot without filesystem sync\n"
 		"    stat [<path>...]                  "
 			"Return inode quota & config\n"
 		"    growfs [<path...]                 "

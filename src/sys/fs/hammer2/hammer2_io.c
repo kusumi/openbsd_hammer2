@@ -159,7 +159,10 @@ hammer2_bread(hammer2_dev_t *hmp, hammer2_io_t *dio, daddr_t lblkno)
 	int error;
 
 	error = bread(dio->devvp, lblkno, dio->psize, &dio->bp);
-	hammer2_inc_iostat(&hmp->iostat_read, dio->btype, dio->psize);
+	if (error)
+		brelse(dio->bp);
+	else
+		hammer2_inc_iostat(&hmp->iostat_read, dio->btype, dio->psize);
 
 	return (error);
 }

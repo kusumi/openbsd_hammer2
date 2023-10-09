@@ -1,17 +1,11 @@
 OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/vfs/hammer2/DESIGN)
 ========
 
-## About
-
-+ HAMMER2 file system for OpenBSD
-
 ## Requirements
 
 + OpenBSD 7.3
 
-+ OpenBSD 7.3 src tree under /usr/src
-
-+ Bash
++ src tree under /usr/src
 
 ## OpenBSD build
 
@@ -47,8 +41,4 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 ## Notes
 
-+ Tags are merely for packaging, nothing directly to do with file system version.
-
-+ [makefs](https://github.com/kusumi/makefs) supports HAMMER2 image creation from a directory contents.
-
-+ This repository will be abandoned once Linux or FreeBSD is stabilized with write support. OpenBSD is not the main target.
++ This repository will be abandoned once Linux or FreeBSD is stabilized with write support. OpenBSD is not the main area of interest.

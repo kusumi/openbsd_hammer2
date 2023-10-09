@@ -429,6 +429,55 @@ done:
 }
 
 /*
+ * Directory collision resolver scan helper (backend, threaded).
+ *
+ * Used by the inode create code to locate an unused lhc.
+ */
+void
+hammer2_xop_scanlhc(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_scanlhc_t *xop = &arg->xop_scanlhc;
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next;
+	int error = 0;
+
+	parent = hammer2_inode_chain(xop->head.ip1, clindex,
+	    HAMMER2_RESOLVE_ALWAYS | HAMMER2_RESOLVE_SHARED);
+	if (parent == NULL) {
+		hprintf("NULL parent\n");
+		chain = NULL;
+		error = HAMMER2_ERROR_EIO;
+		goto done;
+	}
+
+	/*
+	 * Lookup all possibly conflicting directory entries, the feed
+	 * inherits the chain's lock so do not unlock it on the iteration.
+	 */
+	chain = hammer2_chain_lookup(&parent, &key_next, xop->lhc,
+	    xop->lhc + HAMMER2_DIRHASH_LOMASK, &error,
+	    HAMMER2_LOOKUP_ALWAYS | HAMMER2_LOOKUP_SHARED);
+	while (chain) {
+		error = hammer2_xop_feed(&xop->head, chain, clindex, 0);
+		if (error) {
+			hammer2_chain_unlock(chain);
+			hammer2_chain_drop(chain);
+			chain = NULL; /* safety */
+			goto done;
+		}
+		chain = hammer2_chain_next(&parent, chain, &key_next, key_next,
+		    xop->lhc + HAMMER2_DIRHASH_LOMASK, &error,
+		    HAMMER2_LOOKUP_ALWAYS | HAMMER2_LOOKUP_SHARED);
+	}
+done:
+	hammer2_xop_feed(&xop->head, NULL, clindex, error);
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+	}
+}
+
+/*
  * Generic lookup of a specific key.
  */
 void
@@ -512,6 +561,67 @@ done:
 	if (parent) {
 		hammer2_chain_unlock(parent);
 		hammer2_chain_drop(parent);
+	}
+}
+
+/*
+ * Inode create helper (threaded, backend)
+ *
+ * Used by ncreate, nmknod, nsymlink, nmkdir.
+ * Used by nlink and rename to create HARDLINK pointers.
+ *
+ * Frontend holds the parent directory ip locked exclusively.  We
+ * create the inode and feed the exclusively locked chain to the
+ * frontend.
+ */
+void
+hammer2_xop_inode_create(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_create_t *xop = &arg->xop_create;
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next;
+	int error;
+
+	parent = hammer2_inode_chain(xop->head.ip1, clindex,
+	    HAMMER2_RESOLVE_ALWAYS);
+	if (parent == NULL) {
+		error = HAMMER2_ERROR_EIO;
+		chain = NULL;
+		goto fail;
+	}
+	chain = hammer2_chain_lookup(&parent, &key_next, xop->lhc, xop->lhc,
+	    &error, 0);
+	if (chain) {
+		error = HAMMER2_ERROR_EEXIST;
+		goto fail;
+	}
+
+	error = hammer2_chain_create(&parent, &chain, NULL, xop->head.ip1->pmp,
+	    HAMMER2_METH_DEFAULT, xop->lhc, 0, HAMMER2_BREF_TYPE_INODE,
+	    HAMMER2_INODE_BYTES, xop->head.mtid, 0, xop->flags);
+	if (error == 0) {
+		error = hammer2_chain_modify(chain, xop->head.mtid, 0, 0);
+		if (error == 0) {
+			chain->data->ipdata.meta = xop->meta;
+			if (xop->head.name1) {
+				bcopy(xop->head.name1,
+				    chain->data->ipdata.filename,
+				    xop->head.name1_len);
+				chain->data->ipdata.meta.name_len =
+				    xop->head.name1_len;
+			}
+			chain->data->ipdata.meta.name_key = xop->lhc;
+		}
+	}
+fail:
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+	}
+	hammer2_xop_feed(&xop->head, chain, clindex, error);
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
 	}
 }
 

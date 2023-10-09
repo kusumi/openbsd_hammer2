@@ -156,6 +156,8 @@ hammer2_cluster_check(hammer2_cluster_t *cluster, hammer2_key_t key, int flags)
 			cluster->focus = chain;
 			cluster->error = error;
 			break;
+		case HAMMER2_PFSTYPE_NONE:
+			break;
 		default:
 			hpanic("invalid PFS type %d", pmp->pfs_types[i]);
 			break;

@@ -77,6 +77,8 @@ struct hammer2_ioc_pfs {
 
 typedef struct hammer2_ioc_pfs hammer2_ioc_pfs_t;
 
+#define HAMMER2_PFSFLAGS_NOSYNC		0x00000001
+
 /*
  * Ioctl to manage inodes.
  */
@@ -165,7 +167,10 @@ typedef struct hammer2_ioc_volume_list hammer2_ioc_volume_list_t;
  */
 #define HAMMER2IOC_VERSION_GET		_IOWR('h', 64, struct hammer2_ioc_version)
 #define HAMMER2IOC_PFS_GET		_IOWR('h', 80, struct hammer2_ioc_pfs)
+#define HAMMER2IOC_PFS_CREATE		_IOWR('h', 81, struct hammer2_ioc_pfs)
+#define HAMMER2IOC_PFS_DELETE		_IOWR('h', 82, struct hammer2_ioc_pfs)
 #define HAMMER2IOC_PFS_LOOKUP		_IOWR('h', 83, struct hammer2_ioc_pfs)
+#define HAMMER2IOC_PFS_SNAPSHOT		_IOWR('h', 84, struct hammer2_ioc_pfs)
 #define HAMMER2IOC_INODE_GET		_IOWR('h', 86, struct hammer2_ioc_inode)
 #define HAMMER2IOC_INODE_SET		_IOWR('h', 87, struct hammer2_ioc_inode)
 #define HAMMER2IOC_DEBUG_DUMP		_IOWR('h', 91, int)

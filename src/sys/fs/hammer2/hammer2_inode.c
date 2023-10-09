@@ -632,6 +632,131 @@ again:
 }
 
 /*
+ * Create a PFS inode under the superroot.  This function will create the
+ * inode, its media chains, and also insert it into the media.
+ *
+ * Caller must be in a flush transaction because we are inserting the inode
+ * onto the media.
+ */
+hammer2_inode_t *
+hammer2_inode_create_pfs(hammer2_pfs_t *spmp, const char *name, size_t name_len,
+    int *errorp)
+{
+	hammer2_xop_create_t *xop;
+	hammer2_xop_scanlhc_t *sxop;
+	hammer2_inode_t *pip, *nip;
+	hammer2_tid_t pip_inum;
+	hammer2_key_t lhc, lhcbase;
+	uint8_t pip_comp_algo, pip_check_algo;
+	int error;
+
+	pip = spmp->iroot;
+	nip = NULL;
+
+	lhc = hammer2_dirhash(name, name_len);
+	*errorp = 0;
+
+	/*
+	 * Locate the inode or indirect block to create the new
+	 * entry in.  At the same time check for key collisions
+	 * and iterate until we don't get one.
+	 *
+	 * Lock the directory exclusively for now to guarantee that
+	 * we can find an unused lhc for the name.  Due to collisions,
+	 * two different creates can end up with the same lhc so we
+	 * cannot depend on the OS to prevent the collision.
+	 */
+	hammer2_inode_lock(pip, 0);
+
+	pip_comp_algo = pip->meta.comp_algo;
+	pip_check_algo = pip->meta.check_algo;
+	pip_inum = (pip == pip->pmp->iroot) ? 1 : pip->meta.inum;
+
+	/* Locate an unused key in the collision space. */
+	lhcbase = lhc;
+	sxop = hammer2_xop_alloc(pip, HAMMER2_XOP_MODIFYING);
+	sxop->lhc = lhc;
+	hammer2_xop_start(&sxop->head, &hammer2_scanlhc_desc);
+	while ((error = hammer2_xop_collect(&sxop->head, 0)) == 0) {
+		if (lhc != sxop->head.cluster.focus->bref.key)
+			break;
+		++lhc;
+	}
+	hammer2_xop_retire(&sxop->head, HAMMER2_XOPMASK_VOP);
+
+	if (error) {
+		if (error != HAMMER2_ERROR_ENOENT)
+			goto done2;
+		++lhc;
+		error = 0;
+	}
+	if ((lhcbase ^ lhc) & ~HAMMER2_DIRHASH_LOMASK) {
+		error = HAMMER2_ERROR_ENOSPC;
+		goto done2;
+	}
+
+	/* Create the inode with the lhc as the key. */
+	xop = hammer2_xop_alloc(pip, HAMMER2_XOP_MODIFYING);
+	xop->lhc = lhc;
+	xop->flags = HAMMER2_INSERT_PFSROOT;
+	bzero(&xop->meta, sizeof(xop->meta));
+
+	xop->meta.type = HAMMER2_OBJTYPE_DIRECTORY;
+	xop->meta.inum = 1;
+	xop->meta.iparent = pip_inum;
+
+	/* Inherit parent's inode compression mode. */
+	xop->meta.comp_algo = pip_comp_algo;
+	xop->meta.check_algo = pip_check_algo;
+	xop->meta.version = HAMMER2_INODE_VERSION_ONE;
+	hammer2_update_time(&xop->meta.ctime);
+	xop->meta.mtime = xop->meta.ctime;
+	xop->meta.mode = 0755;
+	xop->meta.nlinks = 1;
+
+	/*
+	 * Regular files and softlinks allow a small amount of data to be
+	 * directly embedded in the inode.  This flag will be cleared if
+	 * the size is extended past the embedded limit.
+	 */
+	if (xop->meta.type == HAMMER2_OBJTYPE_REGFILE ||
+	    xop->meta.type == HAMMER2_OBJTYPE_SOFTLINK)
+		xop->meta.op_flags |= HAMMER2_OPFLAG_DIRECTDATA;
+	hammer2_xop_setname(&xop->head, name, name_len);
+	xop->meta.name_len = name_len;
+	xop->meta.name_key = lhc;
+	KKASSERT(name_len < HAMMER2_INODE_MAXNAME);
+
+	hammer2_xop_start(&xop->head, &hammer2_inode_create_desc);
+
+	error = hammer2_xop_collect(&xop->head, 0);
+	if (error) {
+		*errorp = error;
+		goto done;
+	}
+
+	/*
+	 * Set up the new inode if not a hardlink pointer.
+	 *
+	 * NOTE: *_get() integrates chain's lock into the inode lock.
+	 *
+	 * NOTE: Only one new inode can currently be created per
+	 *	 transaction.  If the need arises we can adjust
+	 *	 hammer2_trans_init() to allow more.
+	 *
+	 * NOTE: nipdata will have chain's blockset data.
+	 */
+	nip = hammer2_inode_get(pip->pmp, &xop->head, -1, -1);
+	//nip->comp_heuristic = 0;
+done:
+	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+done2:
+	hammer2_inode_unlock(pip);
+
+	return (nip);
+}
+
+/*
  * Repoint ip->cluster's chains to cluster's chains and fixup the default
  * focus.  All items, valid or invalid, are repointed.
  *

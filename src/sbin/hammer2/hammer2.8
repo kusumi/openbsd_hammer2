@@ -30,7 +30,7 @@
 .\" OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd September 27, 2023
+.Dd October 4, 2023
 .Dt HAMMER2 8
 .Os
 .Sh NAME
@@ -57,6 +57,17 @@ Specify the path to a mounted HAMMER2 filesystem.
 At least one PFS on a HAMMER2 filesystem must be mounted for the system
 to act on all PFSs managed by it.
 Every HAMMER2 filesystem typically has a PFS called "LOCAL" for this purpose.
+.It Fl t Ar type
+Specify the type when creating, upgrading, or downgrading a PFS.
+Supported types are MASTER, SLAVE, SOFT_MASTER, SOFT_SLAVE, CACHE, and DUMMY.
+If not specified the pfs-create directive will default to MASTER if no
+UUID is specified, and SLAVE if a UUID is specified.
+.It Fl u Ar uuid
+Specify the cluster UUID when creating a PFS.
+If not specified, a unique, random UUID will be generated.
+Note that every PFS also has a unique pfs_id which is always generated
+and cannot be overridden with an option.
+The { pfs_clid, pfs_fsid } tuple uniquely identifies a component of a cluster.
 .It Fl m Ar mem
 Specify how much tracking memory to use for certain directives.
 At the moment, this option is only applicable to the
@@ -134,6 +145,137 @@ Print the cluster id for a PFS specified by name.
 .\" ==== pfs-fsid ====
 .It Cm pfs-fsid Ar label
 Print the unique filesystem id for a PFS specified by name.
+.\" ==== pfs-create ====
+.It Cm pfs-create Ar label
+Create a local PFS on the mounted HAMMER2 filesystem represented
+by the current directory, or specified via
+.Fl s Ar mount .
+If no UUID is specified the pfs-type defaults to MASTER.
+If a UUID is specified via the
+.Fl u
+option the pfs-type defaults to SLAVE.
+Other types can be specified with the
+.Fl t
+option.
+.Pp
+If you wish to add a MASTER to an existing cluster, you must first add it as
+a SLAVE and then upgrade it to MASTER to properly synchronize it.
+.Pp
+The DUMMY pfs-type is used to tie network-accessible clusters into the local
+machine when no local storage is desired.
+This type should be used on minimal H2 partitions or entirely in ram for
+netboot-centric systems to provide a tie-in point for the mount command,
+or on more complex systems where you need to also access network-centric
+clusters.
+.Pp
+The CACHE or SLAVE pfs-type is typically used when the main store is on
+the network but local storage is desired to improve performance.
+SLAVE is also used when a backup is desired.
+.Pp
+Generally speaking, you can mount any PFS element of a cluster in order to
+access the cluster via the full cluster protocol.
+There are two exceptions.
+If you mount a SOFT_SLAVE or a SOFT_MASTER then soft quorum semantics are
+employed... the soft slave or soft master's current state will always be used
+and the quorum protocol will not be used.
+The soft PFS will still be
+synchronized to masters in the background when available.
+Also, you can use
+.Sq mount -o local
+to mount ONLY a local HAMMER2 PFS and
+not run any network or quorum protocols for the mount.
+All such mounts except for a SOFT_MASTER mount will be read-only.
+Other than that, you will be mounting the whole cluster when you mount any
+PFS within the cluster.
+.Pp
+DUMMY - Create a PFS skeleton intended to be the mount point for a
+more complex cluster, probably one that is entirely network based.
+No data will be synchronized to this PFS so it is suitable for use
+in a network boot image or memory filesystem.
+This allows you to create placeholders for mount points on your local
+disk, SSD, or memory disk.
+.Pp
+CACHE - Create a PFS for caching portions of the cluster piecemeal.
+This is similar to a SLAVE but does not synchronize the entire contents of
+the cluster to the PFS.
+Elements found in the CACHE PFS which are validated against the cluster
+will be read, presumably a faster access than having to go to the cluster.
+Only local CACHEs will be updated.
+Network-accessible CACHE PFSs might be read but will not be written to.
+If you have a large hard-drive-based cluster you can set up localized
+SSD CACHE PFSs to improve performance.
+.Pp
+SLAVE - Create a PFS which maintains synchronization with and provides a
+read-only copy of the cluster.
+HAMMER2 will prioritize local SLAVEs for data retrieval after validating
+their transaction id against the cluster.
+The difference between a CACHE and a SLAVE is that the SLAVE is synchronized
+to a full copy of the cluster and thus can serve as a backup or be staged
+for use as a MASTER later on.
+.Pp
+SOFT_SLAVE - Create a PFS which maintains synchronization with and provides
+a read-only copy of the cluster.
+This is one of the special mount cases.
+A SOFT_SLAVE will synchronize with
+the cluster when the cluster is available, but can still be accessed when
+the cluster is not available.
+.Pp
+MASTER - Create a PFS which will hold a master copy of the cluster.
+If you create several MASTER PFSs with the same cluster id you are
+effectively creating a multi-master cluster and causing a quorum and
+cache coherency protocol to be used to validate operations.
+The total number of masters is stored in each PFSs making up the cluster.
+Filesystem operations will stall for normal mounts if a quorum cannot be
+obtained to validate the operation.
+MASTER nodes which go offline and return later will synchronize in the
+background.
+Note that when adding a MASTER to an existing cluster you must add the
+new PFS as a SLAVE and then upgrade it to a MASTER.
+.Pp
+SOFT_MASTER - Create a PFS which maintains synchronization with and provides
+a read-write copy of the cluster.
+This is one of the special mount cases.
+A SOFT_MASTER will synchronize with
+the cluster when the cluster is available, but can still be read AND written
+to even when the cluster is not available.
+Modifications made to a SOFT_MASTER will be automatically flushed to the
+cluster when it becomes accessible again, and vise-versa.
+Manual intervention may be required if a conflict occurs during
+synchronization.
+.\" ==== pfs-delete ====
+.It Cm pfs-delete Op label...
+Destroy a PFS by name.
+All hammer2 mount points will be checked, however this directive will refuse to
+delete a PFS whos name is duplicated on multiple mount points.
+A specific mount point may be specified to restrict the deletion via the
+.Fl s Ar mount
+option.
+.\" ==== snapshot ====
+.It Cm snapshot Ar path Op label
+Create a snapshot of a directory.
+The snapshot will be created on the same hammer2 storage device as the
+directory.
+This can only be used on a local PFS, and is only really useful if the PFS
+contains a complete copy of what you desire to snapshot so that typically
+means a local MASTER, SOFT_MASTER, SLAVE, or SOFT_SLAVE must be present.
+Snapshots are created simply by flushing a PFS mount to disk and then copying
+the directory inode to the PFS.
+The topology is snapshotted without having to be copied or scanned and
+take no additional space.
+However, bulkfree scans may take longer.
+Snapshots are effectively separate from the cluster they came from
+and can be used as a starting point for a new cluster.
+So unless you build a new cluster from the snapshot, it will stay local
+to the machine it was made on.
+.Pp
+Snapshots can be maintained automatically with
+.Xr periodic 8 .
+See
+.Xr periodic.conf 5
+for details of enabling and configuring the functionality.
+.\" ==== snapshot-debug ====
+.It Cm snapshot-debug Ar path Op label
+Snapshot without filesystem sync.
 .\" ==== stat ====
 .It Cm stat Op path...
 Print the inode statistics, compression, and other meta-data associated
