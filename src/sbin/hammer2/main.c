@@ -38,10 +38,8 @@
 
 /*
  * XXX HAMMER2 userspace consists of sbin/{hammer2,newfs_hammer2,
- * mount_hammer2,fsck_hammer2}.  These are basically same as DragonFly
- * except that write related are currently removed.  Avoid non functional
- * changes in the name of cleanup which makes it less easy to sync with
- * DragonFly.
+ * mount_hammer2,fsck_hammer2}.  These are mostly portable, so avoid
+ * non functional changes in the name of cleanup.
  */
 
 #include "hammer2.h"
@@ -66,7 +64,7 @@ main(int ac, char **av)
 	/*
 	 * Core options
 	 */
-	while ((ch = getopt(ac, av, "m:rs:vq")) != -1) {
+	while ((ch = getopt(ac, av, "m:rs:t:u:vq")) != -1) {
 		switch(ch) {
 		case 'm':
 			MemOpt = strtoul(optarg, &opt, 0);
@@ -240,6 +238,22 @@ main(int ac, char **av)
 			usage(1);
 		}
 		ecode = cmd_pfs_delete(sel_path, av, ac);
+	} else if (strcmp(av[0], "recover") == 0 ||
+		   strcmp(av[0], "recover-relaxed") == 0 ||
+		   strcmp(av[0], "recover-file") == 0) {
+		/*
+		 * Recover a relative path (unanchored match), absolute path,
+		 * specific file, or directory sub-tree.  File restorals are
+		 * fully validated.
+		 */
+		if (ac != 4) {
+			fprintf(stderr, "recover device [/]path destdir\n");
+			usage(1);
+		} else {
+			int strict = (strcmp(av[0], "recover-relaxed") != 0);
+			int isafile = (strcmp(av[0], "recover-file") == 0);
+			cmd_recover(av[1], av[2], av[3], strict, isafile);
+		}
 	} else if (strcmp(av[0], "snapshot") == 0 ||
 		   strcmp(av[0], "snapshot-debug") == 0) {
 		/*
@@ -412,6 +426,12 @@ usage(int code)
 			"Create a PFS\n"
 		"    pfs-delete <label>                "
 			"Destroy a PFS\n"
+		"    recover <devpath> <path> <destdir> "
+			"Recover deleted or corrupt files or trees\n"
+		"    recover-relaxed <devpath> <path> <destdir> "
+			"Recover deleted or corrupt files or trees\n"
+		"    recover-file <devpath> <path> <destdir> "
+			"Recover, target is explicitly a regular file\n"
 		"    snapshot <path> [<label>]         "
 			"Snapshot a PFS or directory\n"
 		"    snapshot-debug <path> [<label>]   "

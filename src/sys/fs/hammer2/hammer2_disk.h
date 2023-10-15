@@ -837,6 +837,12 @@ struct hammer2_inode_meta {
 
 	/*
 	 * These fields are currently only applicable to PFSROOTs.
+	 *
+	 * NOTE: We can't use {volume_data->fsid, pfs_clid} to uniquely
+	 *	 identify an instance of a PFS in the cluster because
+	 *	 a mount may contain more than one copy of the PFS as
+	 *	 a separate node.  {pfs_clid, pfs_fsid} must be used for
+	 *	 registration in the cluster.
 	 */
 	uint8_t		target_type;	/* 0084 hardlink target type */
 	uint8_t		check_algo;	/* 0085 check code request & algo */
@@ -907,7 +913,25 @@ typedef struct hammer2_inode_data hammer2_inode_data_t;
 #define HAMMER2_COPYID_LOCAL		((uint8_t)-1)
 
 /*
- * PFS types identify the role of a PFS within a cluster.
+ * PFS types identify the role of a PFS within a cluster.  The PFS types
+ * is stored on media and in LNK_SPAN messages and used in other places.
+ *
+ * The low 4 bits specify the current active type while the high 4 bits
+ * specify the transition target if the PFS is being upgraded or downgraded,
+ * If the upper 4 bits are not zero it may effect how a PFS is used during
+ * the transition.
+ *
+ * Generally speaking, downgrading a MASTER to a SLAVE cannot complete until
+ * at least all MASTERs have updated their pfs_nmasters field.  And upgrading
+ * a SLAVE to a MASTER cannot complete until the new prospective master has
+ * been fully synchronized (though theoretically full synchronization is
+ * not required if a (new) quorum of other masters are fully synchronized).
+ *
+ * It generally does not matter which PFS element you actually mount, you
+ * are mounting 'the cluster'.  So, for example, a network mount will mount
+ * a DUMMY PFS type on a memory filesystem.  However, there are two exceptions.
+ * In order to gain the benefits of a SOFT_MASTER or SOFT_SLAVE, those PFSs
+ * must be directly mounted.
  */
 #define HAMMER2_PFSTYPE_NONE		0x00
 #define HAMMER2_PFSTYPE_CACHE		0x01

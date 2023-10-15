@@ -105,14 +105,23 @@ Note : this source file requires "hammer2_lz4_encoder.h"
 //**************************************
 // Includes
 //**************************************
+#ifdef _KERNEL
 #include "hammer2.h"
-#include "hammer2_lz4.h"
 #include <sys/malloc.h> //for malloc macros, hammer2.h includes sys/param.h
+#else
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#endif
+#include "hammer2_lz4.h"
 
 
+#ifdef _KERNEL
 //Declaration for kmalloc functions
 //MALLOC_DEFINE(C_HASHTABLE, "comphashtable",
 //	"A hash table used by LZ4 compression function.");
+#endif
 
 
 //**************************************
@@ -330,13 +339,21 @@ LZ4_createHeapMemory() returns NULL is memory allocation fails.
 void*
 LZ4_create(void)
 {
+#ifdef _KERNEL
 	return malloc(HASHTABLESIZE, M_HAMMER2_LZ4, M_WAITOK);
+#else
+	return malloc(HASHTABLESIZE);
+#endif
 }
 
 int
 LZ4_free(void* ctx)
 {
+#ifdef _KERNEL
 	free(ctx, M_HAMMER2_LZ4, 0);
+#else
+	free(ctx);
+#endif
 	return 0;
 }
 

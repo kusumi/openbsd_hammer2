@@ -1,4 +1,4 @@
-.\" Copyright (c) 2015-2019 The DragonFly Project.  All rights reserved.
+.\" Copyright (c) 2015-2023 The DragonFly Project.  All rights reserved.
 .\"
 .\" This code is derived from software contributed to The DragonFly Project
 .\" by Matthew Dillon <dillon@backplane.com>
@@ -30,7 +30,7 @@
 .\" OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd October 4, 2023
+.Dd October 10, 2023
 .Dt HAMMER2 8
 .Os
 .Sh NAME
@@ -250,6 +250,59 @@ delete a PFS whos name is duplicated on multiple mount points.
 A specific mount point may be specified to restrict the deletion via the
 .Fl s Ar mount
 option.
+.\" ==== recover ====
+.It Cm recover Ar media Ar path Ar destdir
+Recover a file or directory tree by scanning the raw media partition,
+with minimal requirements for an intact topology.  The results are written
+to the destination directory.
+.Pp
+The recovery path can be anchored at (any) root by prefixing it with a "/".
+If not anchored, any matching sub-tree will be recovered and combined into
+one place on the destination (not as separate sub-trees since that requires
+topological knowledge that might not be available).  Roots include all
+PFS roots and snapshot roots, as well as disconnected roots from COW updates
+(aka to be able to undelete a file or directory sub-tree).
+.Pp
+The path may specify a directory or file to restore.  Note that if you
+specify something like ".cshrc", then all ".cshrc" files found in the
+entire filesystem will be recovered.  Multiple references to the same
+physical inode with the same filename in the same directory are filtered out.
+.Pp
+This function is meant for catastrophic recovery or corrupted media or
+recovery for deleted files that are not otherwise available in snapshots.
+All possible versions of files will be recovered and suffixed as "*.%05d"
+with an iterator.
+.Pp
+The hammer2 recovery function is not meant to generate a fully operational
+filesystem in the target directory.  All files will be versioned and contain
+iteration suffixes.  Many files and sub-directory trees may wind up glommed
+together in one place.  However, this function will recover mtime, ownership,
+group, modes, and flags.  Recovered files are fully validated and any missing
+data will cause the file to be renamed with a ".corrupted" suffix.
+.Pp
+Memory requirements - This function needs to track inodes and paths and
+can eat a considerable amount of ram, and it tends to be random-access
+so while swap can make ends meet, it might slow the scan down drastically
+if it has to eat into it much.
+Ram consumption scales with the number of inodes found.  Call it a few
+gigabytes up to 500GB of media and approaching 64GB on busy 4TB media.
+Busy meaning, say, 50 million topological inodes turning into 1 billion
+inodes located by the media scan.
+.\" ==== recover-relaxed ====
+.It Cm recover-relaxed Ar media Ar path Ar destdir
+This version of the recover directive relaxes bref checks.  Under normal
+operation, only brefs with check codes are allowed because we get too many
+false hits otherwise.  In relaxed mode, bref's with the check code disabled
+are also allowed.
+.Pp
+You should only need to use the relaxed version if you have turned off
+CRCs on the files you want to recover.
+.\" ==== recover-file ====
+.It Cm recover-file Ar media Ar path Ar destdir
+This version of recover is the normal strict-mode recover but explicitly
+indicates that the path being recovered is a regular file and not a
+directory.  Prevents junk recursions when entries corresponding to the
+last path element appear to be directories.
 .\" ==== snapshot ====
 .It Cm snapshot Ar path Op label
 Create a snapshot of a directory.

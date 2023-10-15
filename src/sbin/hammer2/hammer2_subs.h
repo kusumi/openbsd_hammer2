@@ -95,6 +95,7 @@ void hammer2_print_volumes(const hammer2_ondisk_t *fsp);
 void hammer2_init_volumes(const char *blkdevs, int rdonly);
 void hammer2_cleanup_volumes(void);
 
+hammer2_volume_t *hammer2_get_volume(hammer2_off_t offset);
 int hammer2_get_volume_fd(hammer2_off_t offset);
 int hammer2_get_root_volume_fd(void);
 int hammer2_get_volume_id(hammer2_off_t offset);
@@ -108,5 +109,10 @@ hammer2_off_t hammer2_get_root_volume_size(void);
 
 hammer2_off_t hammer2_get_total_size(void);
 hammer2_volume_data_t* hammer2_read_root_volume_header(void);
+
+void *hammer2_decompress_LZ4(void *inbuf, size_t insize,
+			size_t outsize, int *statusp);
+void *hammer2_decompress_ZLIB(void *inbuf, size_t insize,
+			size_t outsize, int *statusp);
 
 #endif /* !HAMMER2_HAMMER2_SUBS_H_ */
