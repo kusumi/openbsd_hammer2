@@ -199,7 +199,7 @@ void
 hammer2_chain_init(hammer2_chain_t *chain)
 {
 	RB_INIT(&chain->core.rbtree);
-	hammer2_mtx_init(&chain->lock, "h2ch_lk");
+	hammer2_mtx_init_recurse(&chain->lock, "h2ch_lk");
 	hammer2_mtx_init(&chain->diolk, "h2ch_dlk");
 	rw_init(&chain->inp_lock, "h2ch_inplk");
 	chain->inp_cv = kstrdup("h2ch_inpcv");
@@ -1499,6 +1499,11 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 					    ~HAMMER2_BREF_FLAG_EMERG_MIP;
 				}
 			}
+			debug_hprintf("%s %s chain %016jx %016jx/%d\n",
+			    dedup_off ? "dedup" : "alloc",
+			    hammer2_breftype_to_str(chain->bref.type),
+			    (intmax_t)chain->bref.data_off,
+			    (intmax_t)chain->bref.key, chain->bref.keybits);
 		}
 	}
 
@@ -1901,6 +1906,59 @@ hammer2_chain_lookup_done(hammer2_chain_t *parent)
 		hammer2_chain_unlock(parent);
 		hammer2_chain_drop(parent);
 	}
+}
+
+/*
+ * Take the locked chain and return a locked parent.  The chain remains
+ * locked on return, but may have to be temporarily unlocked to acquire
+ * the parent.  Because of this, (chain) must be stable and cannot be
+ * deleted while it was temporarily unlocked (typically means that (chain)
+ * is an inode).
+ *
+ * Pass HAMMER2_RESOLVE_* flags in flags.
+ *
+ * This will work even if the chain is errored, and the caller can check
+ * parent->error on return if desired since the parent will be locked.
+ *
+ * This function handles the lock order reversal.
+ */
+hammer2_chain_t *
+hammer2_chain_getparent(hammer2_chain_t *chain, int flags)
+{
+	hammer2_chain_t *parent;
+
+	/*
+	 * Be careful of order, chain must be unlocked before parent
+	 * is locked below to avoid a deadlock.  Try it trivially first.
+	 */
+	parent = chain->parent;
+	if (parent == NULL)
+		hpanic("no parent");
+
+	hammer2_chain_ref(parent);
+	if (hammer2_chain_lock(parent, flags|HAMMER2_RESOLVE_NONBLOCK) == 0)
+		return (parent);
+
+	for (;;) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_lock(parent, flags);
+		hammer2_chain_lock(chain, flags);
+
+		/*
+		 * Parent relinking races are quite common.  We have to get
+		 * it right or we will blow up the block table.
+		 */
+		if (chain->parent == parent)
+			break;
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+		cpu_ccfence();
+		parent = chain->parent;
+		if (parent == NULL)
+			hpanic("no parent");
+		hammer2_chain_ref(parent);
+	}
+	return (parent);
 }
 
 /*

@@ -50,7 +50,11 @@ H2XOPDESCRIPTOR(unlink);
 H2XOPDESCRIPTOR(scanlhc);
 H2XOPDESCRIPTOR(lookup);
 H2XOPDESCRIPTOR(delete);
+H2XOPDESCRIPTOR(inode_mkdirent);
 H2XOPDESCRIPTOR(inode_create);
+H2XOPDESCRIPTOR(inode_create_det);
+H2XOPDESCRIPTOR(inode_create_ins);
+H2XOPDESCRIPTOR(inode_destroy);
 H2XOPDESCRIPTOR(bmap);
 H2XOPDESCRIPTOR(inode_chain_sync);
 H2XOPDESCRIPTOR(inode_flush);
@@ -149,6 +153,18 @@ hammer2_xop_setname(hammer2_xop_head_t *xop, const char *name, size_t name_len)
 	bcopy(name, xop->name1, name_len);
 }
 
+size_t
+hammer2_xop_setname_inum(hammer2_xop_head_t *xop, hammer2_key_t inum)
+{
+	const size_t name_len = 18;
+
+	xop->name1 = malloc(name_len + 1, M_HAMMER2, M_WAITOK | M_ZERO);
+	xop->name1_len = name_len;
+	snprintf(xop->name1, name_len + 1, "0x%016jx", (intmax_t)inum);
+
+	return (name_len);
+}
+
 /*
  * (Backend) Returns non-zero if the frontend is still attached.
  */
@@ -197,6 +213,25 @@ xop_unset_ipdep(hammer2_inode_t *ip, int idx)
 		}
 }
 
+#ifdef INVARIANTS
+static void
+xop_storage_func(hammer2_xop_head_t *xop, hammer2_inode_t *ip, int i)
+{
+	/*
+	hprintf("xop_%s inum %016jx index %d\n",
+	    xop->desc->id, (intmax_t)ip->meta.inum, i);
+	*/
+	xop->desc->storage_func((hammer2_xop_t *)xop, i);
+	/*
+	hprintf("xop_%s inum %016jx index %d done\n",
+	    xop->desc->id, (intmax_t)ip->meta.inum, i);
+	*/
+}
+#else
+#define xop_storage_func(xop, ip, i)	\
+	xop->desc->storage_func((hammer2_xop_t *)xop, i)
+#endif
+
 /*
  * Start a XOP request, queueing it to all nodes in the cluster to
  * execute the cluster op.
@@ -235,7 +270,7 @@ again:
 			}
 			rw_exit_write(mtx);
 
-			xop->desc->storage_func((hammer2_xop_t *)xop, i);
+			xop_storage_func(xop, ip, i);
 			hammer2_xop_retire(xop, mask);
 		} else {
 			hammer2_xop_feed(xop, NULL, i, ECONNABORTED);

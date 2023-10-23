@@ -752,6 +752,8 @@ next_hmp:
 		KKASSERT(hmp->voldata.magic == HAMMER2_VOLUME_ID_HBO ||
 		    hmp->voldata.magic == HAMMER2_VOLUME_ID_ABO);
 		hmp->volsync = hmp->voldata;
+		hmp->free_reserved = hmp->voldata.allocator_size / 20;
+
 		/*
 		 * Must use hmp instead of volume header for these two
 		 * in order to handle volume versions transparently.
@@ -823,6 +825,11 @@ next_hmp:
 			return (EINVAL);
 		}
 
+		/*
+		 * The super-root always uses an inode_tid of 1 when
+		 * creating PFSs.
+		 */
+		spmp->inode_tid = 1;
 		spmp->modify_tid = schain->bref.modify_tid + 1;
 
 		/*
@@ -1213,6 +1220,7 @@ again:
 #ifdef INVARIANTS
 	hammer2_dump_chain(&hmp->vchain, 0, 0, -1, 'v');
 	hammer2_dump_chain(&hmp->fchain, 0, 0, -1, 'f');
+#endif
 	/*
 	 * Final drop of embedded volume/freemap root chain to clean up
 	 * [vf]chain.core ([vf]chain structure is not flagged ALLOCATED so
@@ -1220,7 +1228,7 @@ again:
 	 */
 	hammer2_chain_drop(&hmp->vchain);
 	hammer2_chain_drop(&hmp->fchain);
-#endif
+
 	hammer2_mtx_ex(&hmp->iotree_lock);
 	hammer2_io_cleanup(hmp, &hmp->iotree);
 	if (hmp->iofree_count)
@@ -1663,7 +1671,7 @@ restart:
 		 * dependencies may build up, so we definitely need to move
 		 * the whole SIDEQ back to SYNCQ when we restart.
 		 */
-		vp = ip->vp;
+		vp = ip->vp; /* NULL after vflush() */
 		if (vp) {
 			vref(vp);
 			if (vn_lock(vp, LK_EXCLUSIVE | LK_NOWAIT)) {
@@ -1715,16 +1723,9 @@ restart:
 		 * Ok we have the inode exclusively locked and if vp is
 		 * not NULL that will also be exclusively locked.  Do the
 		 * meat of the flush.
-		 *
-		 * vp token needed for v_rbdirty_tree check / vclrisdirty
-		 * sequencing.  Though we hold the vnode exclusively so
-		 * we shouldn't need to hold the token also in this case.
 		 */
-		if (vp) {
-			/* XXX vnode */
-			//vfsync(vp, MNT_WAIT, 1, NULL, NULL);
-			//bio_track_wait(&vp->v_track_write, 0, 0); /* XXX */
-		}
+		if (vp)
+			vflushbuf(vp, 1);
 
 		/*
 		 * If the inode has not yet been inserted into the tree
@@ -1734,14 +1735,12 @@ restart:
 		if (ip->flags & HAMMER2_INODE_DELETING) {
 			debug_hprintf("inum %016jx destroy\n",
 			    (intmax_t)ip->meta.inum);
-			KKASSERT(0); /* XXX vnode */
+			hammer2_inode_chain_des(ip);
 		} else if (ip->flags & HAMMER2_INODE_CREATING) {
 			debug_hprintf("inum %016jx insert\n",
 			    (intmax_t)ip->meta.inum);
-			KKASSERT(0); /* XXX vnode */
+			hammer2_inode_chain_ins(ip);
 		}
-		debug_hprintf("inum %016jx chain-sync\n",
-		    (intmax_t)ip->meta.inum);
 
 		/*
 		 * Because I kinda messed up the design and index the inodes
@@ -1758,16 +1757,28 @@ restart:
 		 * XXX at the moment this will likely result in a double-flush
 		 * of the iroot chain.
 		 */
+		debug_hprintf("inum %016jx pinum %016jx chain-sync\n",
+		    (intmax_t)ip->meta.inum, (intmax_t)ip->meta.iparent);
 		hammer2_inode_chain_sync(ip);
+
 		if (ip == pmp->iroot)
 			hammer2_inode_chain_flush(ip, HAMMER2_XOP_INODE_STOP);
 		else
 			hammer2_inode_chain_flush(ip,
 			    HAMMER2_XOP_INODE_STOP | HAMMER2_XOP_FSSYNC);
 		if (vp) {
-			/* XXX vnode */
+			if ((ip->flags & (HAMMER2_INODE_MODIFIED |
+			    HAMMER2_INODE_RESIZED |
+			    HAMMER2_INODE_DIRTYDATA)) == 0) {
+				/*
+				 * DragonFly uses DragonFly's vsyncscan specific
+				 * vclrisdirty() here.
+				 */
+			} else {
+				hammer2_inode_delayed_sideq(ip);
+			}
 			vput(vp);
-			vrele(vp); /* from hammer2_inode_delayed_sideq() */
+			hammer2_inode_vdrop_all(ip);
 			vp = NULL; /* safety */
 		}
 		atomic_clear_int(&ip->flags, HAMMER2_INODE_SYNCQ_PASS2);
@@ -1817,39 +1828,6 @@ restart:
 	return (error);
 }
 
-/*
- * Volume header data locks.
- */
-void
-hammer2_voldata_lock(hammer2_dev_t *hmp)
-{
-	hammer2_lk_ex(&hmp->vollk);
-}
-
-void
-hammer2_voldata_unlock(hammer2_dev_t *hmp)
-{
-	hammer2_lk_unlock(&hmp->vollk);
-}
-
-/*
- * Caller indicates that the volume header is being modified.
- * Flag the related chain and adjust its transaction id.
- *
- * The transaction id is set to voldata.mirror_tid + 1, similar to
- * what hammer2_chain_modify() does.  Be very careful here, volume
- * data can be updated independently of the rest of the filesystem.
- */
-void
-hammer2_voldata_modify(hammer2_dev_t *hmp)
-{
-	if ((hmp->vchain.flags & HAMMER2_CHAIN_MODIFIED) == 0) {
-		atomic_add_long(&hammer2_count_modified_chains, 1);
-		atomic_set_int(&hmp->vchain.flags, HAMMER2_CHAIN_MODIFIED);
-		hmp->vchain.bref.mirror_tid = hmp->voldata.mirror_tid + 1;
-	}
-}
-
 static int
 hammer2_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 {
@@ -1865,7 +1843,7 @@ hammer2_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	ip = hammer2_inode_lookup(pmp, inum);
 	if (ip) {
 		hammer2_inode_lock(ip, HAMMER2_RESOLVE_SHARED);
-		error = hammer2_igetv(mp, ip, vpp);
+		error = hammer2_igetv(ip, vpp);
 		hammer2_inode_unlock(ip);
 		hammer2_inode_drop(ip); /* from lookup */
 		return (error);
@@ -1876,13 +1854,12 @@ hammer2_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	xop->lhc = inum;
 	hammer2_xop_start(&xop->head, &hammer2_lookup_desc);
 	error = hammer2_xop_collect(&xop->head, 0);
-
 	if (error == 0)
 		ip = hammer2_inode_get(pmp, &xop->head, -1, -1);
 	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 
 	if (ip) {
-		error = hammer2_igetv(mp, ip, vpp);
+		error = hammer2_igetv(ip, vpp);
 		hammer2_inode_unlock(ip);
 	} else {
 		*vpp = NULL;
@@ -1947,8 +1924,7 @@ hammer2_root(struct mount *mp, struct vnode **vpp)
 		hammer2_inode_unlock(pmp->iroot);
 		*vpp = NULL;
 	} else {
-		/* lock order reversal: iroot->lock -> v_vnlock */
-		error = hammer2_igetv(mp, pmp->iroot, vpp);
+		error = hammer2_igetv(pmp->iroot, vpp);
 		hammer2_inode_unlock(pmp->iroot);
 	}
 
@@ -1967,31 +1943,55 @@ hammer2_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
 {
 	hammer2_pfs_t *pmp = MPTOPMP(mp);
 	hammer2_dev_t *hmp;
-	hammer2_cluster_t *cluster;
-	hammer2_chain_t *chain;
+	hammer2_blockref_t bref;
+	struct ucred *cred = curproc->p_ucred;
+	struct statfs tmp;
+	uint64_t adj;
+	int i;
 
 	KKASSERT(mp->mnt_stat.f_iosize > 0);
 	KKASSERT(mp->mnt_stat.f_bsize > 0);
 
-	hmp = pmp->pfs_hmps[0];
-	if (hmp == NULL)
-		return (EINVAL);
+	bzero(&tmp, sizeof(tmp));
 
-	cluster = &pmp->iroot->cluster;
-	hammer2_assert_cluster(cluster);
+	for (i = 0; i < pmp->iroot->cluster.nchains; ++i) {
+		hmp = pmp->pfs_hmps[i];
+		if (hmp == NULL)
+			continue;
+		if (pmp->iroot->cluster.array[i].chain)
+			bref = pmp->iroot->cluster.array[i].chain->bref;
+		else
+			bzero(&bref, sizeof(bref));
 
-	chain = cluster->array[0].chain;
+		tmp.f_files = bref.embed.stats.inode_count;
+		tmp.f_ffree = 0;
+		tmp.f_blocks = hmp->voldata.allocator_size /
+		    mp->mnt_stat.f_bsize;
+		tmp.f_bfree = hmp->voldata.allocator_free /
+		    mp->mnt_stat.f_bsize;
+		tmp.f_bavail = tmp.f_bfree;
 
-	sbp->f_bsize = mp->mnt_stat.f_bsize;
-	sbp->f_iosize = mp->mnt_stat.f_iosize;
-	sbp->f_blocks = hmp->voldata.allocator_size / mp->mnt_stat.f_bsize;
-	sbp->f_bfree = hmp->voldata.allocator_free / mp->mnt_stat.f_bsize;
-	sbp->f_bavail = sbp->f_bfree;
-	sbp->f_files = chain ? chain->bref.embed.stats.inode_count : 0;
-	sbp->f_ffree = 0;
-	sbp->f_favail = 0;
-	copy_statfs_info(sbp, mp);
+		if (cred && cred->cr_uid != 0) {
+			/* 5% */
+			adj = hmp->free_reserved / mp->mnt_stat.f_bsize;
+			tmp.f_blocks -= adj;
+			tmp.f_bfree -= adj;
+			tmp.f_bavail -= adj;
+		}
 
+		mp->mnt_stat.f_blocks = tmp.f_blocks;
+		mp->mnt_stat.f_bfree = tmp.f_bfree;
+		mp->mnt_stat.f_bavail = tmp.f_bavail;
+		mp->mnt_stat.f_files = tmp.f_files;
+		mp->mnt_stat.f_ffree = tmp.f_ffree;
+
+		*sbp = mp->mnt_stat;
+		sbp->f_iosize = mp->mnt_stat.f_iosize;
+		sbp->f_bsize = mp->mnt_stat.f_bsize;
+
+		sbp->f_favail = 0;
+		copy_statfs_info(sbp, mp);
+	}
 	return (0);
 }
 
@@ -2064,6 +2064,90 @@ hammer2_check_export(struct mount *mp, struct mbuf *nam, int *exflagsp,
 
 	*exflagsp = np->netc_exflags;
 	*credanonp = &np->netc_anon;
+	return (0);
+}
+
+/*
+ * Volume header data locks.
+ */
+void
+hammer2_voldata_lock(hammer2_dev_t *hmp)
+{
+	hammer2_lk_ex(&hmp->vollk);
+}
+
+void
+hammer2_voldata_unlock(hammer2_dev_t *hmp)
+{
+	hammer2_lk_unlock(&hmp->vollk);
+}
+
+/*
+ * Caller indicates that the volume header is being modified.
+ * Flag the related chain and adjust its transaction id.
+ *
+ * The transaction id is set to voldata.mirror_tid + 1, similar to
+ * what hammer2_chain_modify() does.  Be very careful here, volume
+ * data can be updated independently of the rest of the filesystem.
+ */
+void
+hammer2_voldata_modify(hammer2_dev_t *hmp)
+{
+	if ((hmp->vchain.flags & HAMMER2_CHAIN_MODIFIED) == 0) {
+		atomic_add_long(&hammer2_count_modified_chains, 1);
+		atomic_set_int(&hmp->vchain.flags, HAMMER2_CHAIN_MODIFIED);
+		hmp->vchain.bref.mirror_tid = hmp->voldata.mirror_tid + 1;
+	}
+}
+
+/*
+ * Returns 0 if the filesystem has tons of free space.
+ * Returns 1 if the filesystem has less than 10% remaining.
+ * Returns 2 if the filesystem has less than 2%/5% (user/root) remaining.
+ */
+int
+hammer2_vfs_enospace(hammer2_inode_t *ip, off_t bytes, struct ucred *cred)
+{
+	hammer2_dev_t *hmp;
+	hammer2_pfs_t *pmp = ip->pmp;
+	hammer2_off_t free_reserved, free_nominal;
+	int i;
+
+	if (pmp->free_ticks == 0 || pmp->free_ticks != getticks()) {
+		free_reserved = HAMMER2_SEGSIZE;
+		free_nominal = 0x7FFFFFFFFFFFFFFFLLU;
+		for (i = 0; i < pmp->iroot->cluster.nchains; ++i) {
+			hmp = pmp->pfs_hmps[i];
+			if (hmp == NULL)
+				continue;
+			if (pmp->pfs_types[i] != HAMMER2_PFSTYPE_MASTER &&
+			    pmp->pfs_types[i] != HAMMER2_PFSTYPE_SOFT_MASTER)
+				continue;
+			if (free_nominal > hmp->voldata.allocator_free)
+				free_nominal = hmp->voldata.allocator_free;
+			if (free_reserved < hmp->free_reserved)
+				free_reserved = hmp->free_reserved;
+		}
+		/* SMP races ok */
+		pmp->free_reserved = free_reserved;
+		pmp->free_nominal = free_nominal;
+		pmp->free_ticks = getticks();
+	} else {
+		free_reserved = pmp->free_reserved;
+		free_nominal = pmp->free_nominal;
+	}
+
+	if (cred && cred->cr_uid != 0) {
+		if ((int64_t)(free_nominal - bytes) < (int64_t)free_reserved)
+			return (2);
+	} else {
+		if ((int64_t)(free_nominal - bytes) < (int64_t)free_reserved / 2)
+			return (2);
+	}
+
+	if ((int64_t)(free_nominal - bytes) < (int64_t)free_reserved * 2)
+		return (1);
+
 	return (0);
 }
 

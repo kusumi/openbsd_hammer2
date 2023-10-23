@@ -225,6 +225,31 @@ hammer2_trans_done(hammer2_pfs_t *pmp, uint32_t flags)
 }
 
 /*
+ * Obtain new, unique inode number (not serialized by caller).
+ */
+hammer2_tid_t
+hammer2_trans_newinum(hammer2_pfs_t *pmp)
+{
+	hammer2_tid_t tid;
+
+	tid = atomic_fetchadd_64(&pmp->inode_tid, 1);
+
+	return (tid);
+}
+
+/*
+ * Assert that a strategy call is ok here.  Currently we allow strategy
+ * calls in all situations, including during flushes.
+ */
+void
+hammer2_trans_assert_strategy(hammer2_pfs_t *pmp)
+{
+#if 0
+	KKASSERT((pmp->trans.flags & HAMMER2_TRANS_ISFLUSH) == 0);
+#endif
+}
+
+/*
  * Flush the chain and all modified sub-chains through the specified
  * synchronization point, propagating blockref updates back up.  As
  * part of this propagation, mirror_tid and inode/data usage statistics

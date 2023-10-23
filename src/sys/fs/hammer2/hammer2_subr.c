@@ -96,6 +96,30 @@ hammer2_get_vtype(uint8_t type)
 	/* not reached */
 }
 
+uint8_t
+hammer2_get_obj_type(uint8_t vtype)
+{
+	switch (vtype) {
+	case VDIR:
+		return (HAMMER2_OBJTYPE_DIRECTORY);
+	case VREG:
+		return (HAMMER2_OBJTYPE_REGFILE);
+	case VFIFO:
+		return (HAMMER2_OBJTYPE_FIFO);
+	case VSOCK:
+		return (HAMMER2_OBJTYPE_SOCKET);
+	case VCHR:
+		return (HAMMER2_OBJTYPE_CDEV);
+	case VBLK:
+		return (HAMMER2_OBJTYPE_BDEV);
+	case VLNK:
+		return (HAMMER2_OBJTYPE_SOFTLINK);
+	default:
+		return (HAMMER2_OBJTYPE_UNKNOWN);
+	}
+	/* not reached */
+}
+
 /*
  * Convert a HAMMER2 64-bit time to a timespec.
  */
@@ -113,6 +137,13 @@ uint32_t
 hammer2_to_unix_xid(const struct uuid *uuid)
 {
 	return (*(const uint32_t *)&uuid->node[2]);
+}
+
+void
+hammer2_guid_to_uuid(struct uuid *uuid, uint32_t guid)
+{
+	bzero(uuid, sizeof(*uuid));
+	*(uint32_t *)&uuid->node[2] = guid;
 }
 
 /*

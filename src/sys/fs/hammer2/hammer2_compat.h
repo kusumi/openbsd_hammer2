@@ -111,17 +111,6 @@ atomic_fetchadd_64(volatile uint64_t *p, uint64_t v)
 	return (value);
 }
 
-static __inline int
-rw_tryupgrade(struct rrwlock *p)
-{
-	KASSERT(rrw_status(p) != 0);
-	KASSERT(rrw_status(p) != RW_WRITE);
-
-	rrw_exit(p);
-
-	return (rrw_enter(p, RW_WRITE|RW_NOSLEEP) ? 0 : 1); /* 0 on failure */
-}
-
 #define cpu_pause	CPU_BUSY_CYCLE
 
 /* Taken from sys/sys/cdefs.h in FreeBSD. */
