@@ -130,6 +130,17 @@ hammer2_time_to_timespec(uint64_t xtime, struct timespec *ts)
 	ts->tv_nsec = (unsigned int)(xtime % 1000000) * 1000L;
 }
 
+uint64_t
+hammer2_timespec_to_time(const struct timespec *ts)
+{
+	uint64_t xtime;
+
+	xtime = (unsigned)(ts->tv_nsec / 1000) +
+	    (unsigned long)ts->tv_sec * 1000000ULL;
+
+	return(xtime);
+}
+
 /*
  * Convert a uuid to a unix uid or gid.
  */

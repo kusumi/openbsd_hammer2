@@ -403,6 +403,16 @@ done:
  * allocated can be specified.  If it is not sufficient multiple topology
  * passes will be made.
  */
+void
+hammer2_bulkfree_init(hammer2_dev_t *hmp)
+{
+}
+
+void
+hammer2_bulkfree_uninit(hammer2_dev_t *hmp)
+{
+}
+
 int
 hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
     hammer2_ioc_bulkfree_t *bfi)

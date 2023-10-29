@@ -1,3 +1,10 @@
+v1.2.1
+======
+- Add VOP's
+- Reduce diff vs other BSD's
+- Add patch/openbsd74.patch
+- Remove patch/openbsd73.patch
+
 v1.2.0
 ======
 - Add VOP's

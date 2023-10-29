@@ -48,6 +48,7 @@ H2XOPDESCRIPTOR(readdir);
 H2XOPDESCRIPTOR(nresolve);
 H2XOPDESCRIPTOR(unlink);
 H2XOPDESCRIPTOR(scanlhc);
+H2XOPDESCRIPTOR(scanall);
 H2XOPDESCRIPTOR(lookup);
 H2XOPDESCRIPTOR(delete);
 H2XOPDESCRIPTOR(inode_mkdirent);
@@ -57,6 +58,7 @@ H2XOPDESCRIPTOR(inode_create_ins);
 H2XOPDESCRIPTOR(inode_destroy);
 H2XOPDESCRIPTOR(bmap);
 H2XOPDESCRIPTOR(inode_chain_sync);
+H2XOPDESCRIPTOR(inode_unlinkall);
 H2XOPDESCRIPTOR(inode_flush);
 H2XOPDESCRIPTOR(strategy_read);
 
@@ -186,7 +188,7 @@ xop_testset_ipdep(hammer2_inode_t *ip, int idx)
 	hammer2_ipdep_list_t *ipdep;
 	hammer2_inode_t *iptmp;
 
-	rw_assert_wrlock(&ip->pmp->xop_lock[idx]);
+	hammer2_lk_assert_ex(&ip->pmp->xop_lock[idx]);
 
 	ipdep = &ip->pmp->ipdep_lists[idx];
 	LIST_FOREACH(iptmp, ipdep, ientry)
@@ -203,7 +205,7 @@ xop_unset_ipdep(hammer2_inode_t *ip, int idx)
 	hammer2_ipdep_list_t *ipdep;
 	hammer2_inode_t *iptmp;
 
-	rw_assert_wrlock(&ip->pmp->xop_lock[idx]);
+	hammer2_lk_assert_ex(&ip->pmp->xop_lock[idx]);
 
 	ipdep = &ip->pmp->ipdep_lists[idx];
 	LIST_FOREACH(iptmp, ipdep, ientry)
@@ -214,18 +216,19 @@ xop_unset_ipdep(hammer2_inode_t *ip, int idx)
 }
 
 #ifdef INVARIANTS
-static void
+//#define XOP_ADMIN_DEBUG
+static __inline void
 xop_storage_func(hammer2_xop_head_t *xop, hammer2_inode_t *ip, int i)
 {
-	/*
+#ifdef XOP_ADMIN_DEBUG
 	hprintf("xop_%s inum %016jx index %d\n",
 	    xop->desc->id, (intmax_t)ip->meta.inum, i);
-	*/
+#endif
 	xop->desc->storage_func((hammer2_xop_t *)xop, i);
-	/*
+#ifdef XOP_ADMIN_DEBUG
 	hprintf("xop_%s inum %016jx index %d done\n",
 	    xop->desc->id, (intmax_t)ip->meta.inum, i);
-	*/
+#endif
 }
 #else
 #define xop_storage_func(xop, ip, i)	\
@@ -241,8 +244,8 @@ hammer2_xop_start(hammer2_xop_head_t *xop, hammer2_xop_desc_t *desc)
 {
 	hammer2_inode_t *ip = xop->ip1;
 	hammer2_pfs_t *pmp = ip->pmp;
-	struct rwlock *mtx;
-	char *cv;
+	hammer2_lk_t *mtx;
+	hammer2_lkc_t *cv;
 	uint32_t mask;
 	int i;
 
@@ -260,15 +263,15 @@ hammer2_xop_start(hammer2_xop_head_t *xop, hammer2_xop_desc_t *desc)
 
 		if (hammer2_xop_active(xop)) {
 			mtx = &pmp->xop_lock[ip->ipdep_idx];
-			cv = pmp->xop_cv[ip->ipdep_idx];
-			rw_enter_write(mtx);
+			cv = &pmp->xop_cv[ip->ipdep_idx];
+			hammer2_lk_ex(mtx);
 again:
 			if (xop_testset_ipdep(ip, ip->ipdep_idx)) {
 				pmp->flags |= HAMMER2_PMPF_WAITING;
-				rwsleep(cv, mtx, PCATCH, cv, 0);
+				hammer2_lkc_sleep(cv, mtx, "h2pmp_xop");
 				goto again;
 			}
-			rw_exit_write(mtx);
+			hammer2_lk_unlock(mtx);
 
 			xop_storage_func(xop, ip, i);
 			hammer2_xop_retire(xop, mask);
@@ -288,8 +291,8 @@ hammer2_xop_retire(hammer2_xop_head_t *xop, uint32_t mask)
 	hammer2_pfs_t *pmp;
 	hammer2_chain_t *chain;
 	hammer2_inode_t *ip;
-	struct rwlock *mtx;
-	char *cv;
+	hammer2_lk_t *mtx;
+	hammer2_lkc_t *cv;
 	hammer2_xop_fifo_t *fifo;
 	uint32_t omask;
 	int i;
@@ -337,14 +340,14 @@ hammer2_xop_retire(hammer2_xop_head_t *xop, uint32_t mask)
 	if (ip) {
 		pmp = ip->pmp;
 		mtx = &pmp->xop_lock[ip->ipdep_idx];
-		cv = pmp->xop_cv[ip->ipdep_idx];
-		rw_enter_write(mtx);
+		cv = &pmp->xop_cv[ip->ipdep_idx];
+		hammer2_lk_ex(mtx);
 		xop_unset_ipdep(ip, ip->ipdep_idx);
 		if (pmp->flags & HAMMER2_PMPF_WAITING) {
 			pmp->flags &= ~HAMMER2_PMPF_WAITING;
-			wakeup(cv);
+			hammer2_lkc_wakeup(cv);
 		}
-		rw_exit_write(mtx);
+		hammer2_lk_unlock(mtx);
 
 		hammer2_inode_drop(ip);
 		xop->ip1 = NULL;

@@ -741,6 +741,7 @@ again:
 	 */
 	nip->refs = 1;
 	hammer2_mtx_init_recurse(&nip->lock, "h2ip_lk");
+	hammer2_mtx_init(&nip->truncate_lock, "h2ip_trlk");
 	rrw_init_flags(&nip->vnlock, "h2vn_lk", RWL_DUPOK | RWL_IS_VNODE);
 	hammer2_mtx_ex(&nip->lock);
 	TAILQ_INIT(&nip->depend_static.sideq);
@@ -890,24 +891,6 @@ done2:
 }
 
 /*
- * This helper function may be used by VFSs to implement UNIX initial
- * ownership semantics when creating new objects inside directories.
- */
-static uid_t
-vop_helper_create_uid(struct mount *mp, mode_t dmode, uid_t duid,
-    struct ucred *cred, mode_t *modep)
-{
-#ifdef SUIDDIR
-	if ((mp->mnt_flag & MNT_SUIDDIR) && (dmode & S_ISUID) &&
-	    duid != cred->cr_uid && duid) {
-		*modep &= ~07111;
-		return (duid);
-	}
-#endif
-	return (cred->cr_uid);
-}
-
-/*
  * Create a new, normal inode.  This function will create the inode,
  * the media chains, but will not insert the chains onto the media topology
  * (doing so would require a flush transaction and cause long stalls).
@@ -921,10 +904,8 @@ hammer2_inode_create_normal(hammer2_inode_t *pip, struct vattr *vap,
 	hammer2_xop_create_t *xop;
 	hammer2_inode_t *dip, *nip;
 	hammer2_tid_t pip_inum;
-	struct uuid pip_uid, pip_gid;
-	uint32_t pip_mode;
+	struct uuid pip_gid;
 	uint8_t pip_comp_algo, pip_check_algo;
-	uid_t xuid;
 	int error;
 
 	dip = pip->pmp->iroot;
@@ -932,9 +913,7 @@ hammer2_inode_create_normal(hammer2_inode_t *pip, struct vattr *vap,
 
 	*errorp = 0;
 
-	pip_uid = pip->meta.uid;
 	pip_gid = pip->meta.gid;
-	pip_mode = pip->meta.mode;
 	pip_comp_algo = pip->meta.comp_algo;
 	pip_check_algo = pip->meta.check_algo;
 	pip_inum = (pip == pip->pmp->iroot) ? 1 : pip->meta.inum;
@@ -971,16 +950,13 @@ hammer2_inode_create_normal(hammer2_inode_t *pip, struct vattr *vap,
 	nip->meta.mode = vap->va_mode;
 	nip->meta.nlinks = 1;
 
-	xuid = hammer2_to_unix_xid(&pip_uid);
-	xuid = vop_helper_create_uid(dip->pmp->mp, pip_mode, xuid, cred,
-	    &vap->va_mode);
 	/* if (vap->va_vaflags & VA_UID_UUID_VALID)
 		nip->meta.uid = vap->va_uid_uuid;
 	else */
 	if (vap->va_uid != (uid_t)VNOVAL)
 		hammer2_guid_to_uuid(&nip->meta.uid, vap->va_uid);
 	else
-		hammer2_guid_to_uuid(&nip->meta.uid, xuid);
+		hammer2_guid_to_uuid(&nip->meta.uid, cred->cr_uid);
 
 	/* if (vap->va_vaflags & VA_GID_UUID_VALID)
 		nip->meta.gid = vap->va_gid_uuid;

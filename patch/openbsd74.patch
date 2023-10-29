@@ -1,8 +1,8 @@
 diff --git a/distrib/sets/lists/comp/mi b/distrib/sets/lists/comp/mi
-index 85cf42336..d6c4c4035 100644
+index 95b91489e..f1d225c31 100644
 --- a/distrib/sets/lists/comp/mi
 +++ b/distrib/sets/lists/comp/mi
-@@ -908,6 +908,10 @@
+@@ -914,6 +914,10 @@
  ./usr/include/getopt.h
  ./usr/include/glob.h
  ./usr/include/grp.h
@@ -26,7 +26,7 @@ index 6454e1dc8..ce5e90f9c 100644
  afterinstall:
  	ln -sf ../../sbin/sysctl ${DESTDIR}/usr/sbin
 diff --git a/sbin/sysctl/sysctl.c b/sbin/sysctl/sysctl.c
-index e7ce92199..9ac03a992 100644
+index c22bd4b94..e154c2c33 100644
 --- a/sbin/sysctl/sysctl.c
 +++ b/sbin/sysctl/sysctl.c
 @@ -91,6 +91,8 @@
@@ -38,7 +38,7 @@ index e7ce92199..9ac03a992 100644
  #include <ddb/db_var.h>
  
  #include <ctype.h>
-@@ -1250,6 +1252,7 @@ struct ctlname vfsgennames[] = CTL_VFSGENCTL_NAMES;
+@@ -1257,6 +1259,7 @@ struct ctlname vfsgennames[] = CTL_VFSGENCTL_NAMES;
  struct ctlname ffsname[] = FFS_NAMES;
  struct ctlname nfsname[] = FS_NFS_NAMES;
  struct ctlname fusefsname[] = FUSEFS_NAMES;
@@ -46,7 +46,7 @@ index e7ce92199..9ac03a992 100644
  struct list *vfsvars;
  int *vfs_typenums;
  
-@@ -1312,6 +1315,10 @@ vfsinit(void)
+@@ -1319,6 +1322,10 @@ vfsinit(void)
  			vfsvars[cnt].list = fusefsname;
  			vfsvars[cnt].size = FUSEFS_MAXID;
  		}
@@ -58,7 +58,7 @@ index e7ce92199..9ac03a992 100644
  		strlcat(&names[loc], vfc.vfc_name, sizeof names - loc);
  		vfsname[cnt].ctl_name = &names[loc];
 diff --git a/sys/conf/GENERIC b/sys/conf/GENERIC
-index f7bb589c8..5e57732c5 100644
+index c10d1268f..1d83ac46f 100644
 --- a/sys/conf/GENERIC
 +++ b/sys/conf/GENERIC
 @@ -42,6 +42,7 @@ option		MSDOSFS		# MS-DOS file system
@@ -70,10 +70,10 @@ index f7bb589c8..5e57732c5 100644
  option		SOCKET_SPLICE	# Socket Splicing for TCP and UDP
  option		TCP_ECN		# Explicit Congestion Notification for TCP
 diff --git a/sys/conf/files b/sys/conf/files
-index 661140040..2bb78275c 100644
+index 2a05c7cd0..d03238292 100644
 --- a/sys/conf/files
 +++ b/sys/conf/files
-@@ -804,6 +804,23 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
+@@ -809,6 +809,23 @@ file tmpfs/tmpfs_vfsops.c		tmpfs
  file tmpfs/tmpfs_vnops.c		tmpfs
  file tmpfs/tmpfs_specops.c		tmpfs
  file tmpfs/tmpfs_fifoops.c		tmpfs & fifo
@@ -97,7 +97,7 @@ index 661140040..2bb78275c 100644
  file net/art.c
  file net/bpf.c				bpfilter		needs-count
  file net/bpf_filter.c			bpfilter
-@@ -1041,6 +1058,7 @@ file lib/libkern/getsn.c
+@@ -1047,6 +1064,7 @@ file lib/libkern/getsn.c
  file lib/libkern/random.c
  file lib/libkern/explicit_bzero.c
  file lib/libkern/timingsafe_bcmp.c
@@ -122,7 +122,7 @@ index 84c00f0e4..59715d5d8 100644
  
  
 diff --git a/sys/kern/vfs_vnops.c b/sys/kern/vfs_vnops.c
-index e6a175e9f..f3c491bf3 100644
+index 765b70a09..c764d3469 100644
 --- a/sys/kern/vfs_vnops.c
 +++ b/sys/kern/vfs_vnops.c
 @@ -517,7 +517,8 @@ vn_ioctl(struct file *fp, u_long com, caddr_t data, struct proc *p)
@@ -136,12 +136,12 @@ index e6a175e9f..f3c491bf3 100644
  	case VFIFO:
  	case VCHR:
 diff --git a/sys/sys/malloc.h b/sys/sys/malloc.h
-index 97bf9ff60..4f8b6fd6f 100644
+index 81fcbcfc3..a28cd44f7 100644
 --- a/sys/sys/malloc.h
 +++ b/sys/sys/malloc.h
 @@ -177,7 +177,11 @@
  
- #define M_DRM		145	/* Direct Rendering Manager */
+ #define	M_DRM		145	/* Direct Rendering Manager */
  
 -#define	M_LAST		146	/* Must be last type + 1 */
 +#define	M_HAMMER2	146	/* HAMMER2 */
@@ -163,7 +163,7 @@ index 97bf9ff60..4f8b6fd6f 100644
  
  struct kmemstats {
 diff --git a/sys/sys/mount.h b/sys/sys/mount.h
-index 40c12e976..d18fa04b4 100644
+index 27bec4f26..bbbfdbfc8 100644
 --- a/sys/sys/mount.h
 +++ b/sys/sys/mount.h
 @@ -257,6 +257,15 @@ struct fusefs_args {
@@ -207,7 +207,7 @@ index 40c12e976..d18fa04b4 100644
  #include <net/radix.h>
  #include <sys/socket.h>		/* XXX for AF_MAX */
 diff --git a/sys/sys/vnode.h b/sys/sys/vnode.h
-index 30787afdd..19c4fb12f 100644
+index 994ceb623..fe62b86a6 100644
 --- a/sys/sys/vnode.h
 +++ b/sys/sys/vnode.h
 @@ -67,12 +67,14 @@ enum vtagtype	{

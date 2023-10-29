@@ -37,6 +37,9 @@
 
 #include "hammer2.h"
 
+#include <sys/fcntl.h>
+#include <sys/dkio.h>
+
 #define HAMMER2_FLUSH_DEPTH_LIMIT	60 /* stack recursion limit */
 
 /*
@@ -67,6 +70,14 @@ static int hammer2_flush_core(hammer2_flush_info_t *, hammer2_chain_t *, int);
 static int hammer2_flush_recurse(hammer2_chain_t *, void *);
 
 /*
+ * Any per-pfs transaction initialization goes here.
+ */
+void
+hammer2_trans_manage_init(hammer2_pfs_t *pmp)
+{
+}
+
+/*
  * Transaction support for any modifying operation.  Transactions are used
  * in the pmp layer by the frontend and in the spmp layer by the backend.
  *
@@ -85,7 +96,7 @@ hammer2_trans_init(hammer2_pfs_t *pmp, uint32_t flags)
 	uint32_t oflags, nflags;
 	int dowait;
 
-	rw_enter_write(&pmp->trans_lock);
+	hammer2_lk_ex(&pmp->trans_lock);
 	for (;;) {
 		oflags = pmp->trans.flags;
 		cpu_ccfence();
@@ -124,8 +135,8 @@ hammer2_trans_init(hammer2_pfs_t *pmp, uint32_t flags)
 		if (atomic_cmpset_int(&pmp->trans.flags, oflags, nflags)) {
 			if (dowait == 0)
 				break;
-			rwsleep(pmp->trans_cv, &pmp->trans_lock, PCATCH,
-			    pmp->trans_cv, 0);
+			hammer2_lkc_sleep(&pmp->trans_cv, &pmp->trans_lock,
+			    "h2pmp_tr");
 			/* retry */
 		} else {
 			cpu_pause();
@@ -133,7 +144,7 @@ hammer2_trans_init(hammer2_pfs_t *pmp, uint32_t flags)
 		}
 		/* retry */
 	}
-	rw_exit_write(&pmp->trans_lock);
+	hammer2_lk_unlock(&pmp->trans_lock);
 }
 
 /*
@@ -173,20 +184,20 @@ hammer2_trans_clearflags(hammer2_pfs_t *pmp, uint32_t flags)
 {
 	uint32_t oflags, nflags;
 
-	rw_enter_write(&pmp->trans_lock);
+	hammer2_lk_ex(&pmp->trans_lock);
 	for (;;) {
 		oflags = pmp->trans.flags;
 		cpu_ccfence();
 		nflags = oflags & ~flags;
 		if (atomic_cmpset_int(&pmp->trans.flags, oflags, nflags)) {
 			if ((oflags ^ nflags) & HAMMER2_TRANS_WAITING)
-				wakeup(pmp->trans_cv);
+				hammer2_lkc_wakeup(&pmp->trans_cv);
 			break;
 		}
 		cpu_pause();
 		/* retry */
 	}
-	rw_exit_write(&pmp->trans_lock);
+	hammer2_lk_unlock(&pmp->trans_lock);
 }
 
 void
@@ -199,7 +210,7 @@ hammer2_trans_done(hammer2_pfs_t *pmp, uint32_t flags)
 	 * a flush transaction or transitioning the non-flush transaction
 	 * count from 2->1 while a flush transaction is pending.
 	 */
-	rw_enter_write(&pmp->trans_lock);
+	hammer2_lk_ex(&pmp->trans_lock);
 	for (;;) {
 		oflags = pmp->trans.flags;
 		cpu_ccfence();
@@ -215,13 +226,13 @@ hammer2_trans_done(hammer2_pfs_t *pmp, uint32_t flags)
 
 		if (atomic_cmpset_int(&pmp->trans.flags, oflags, nflags)) {
 			if ((oflags ^ nflags) & HAMMER2_TRANS_WAITING)
-				wakeup(pmp->trans_cv);
+				hammer2_lkc_wakeup(&pmp->trans_cv);
 			break;
 		}
 		cpu_pause();
 		/* retry */
 	}
-	rw_exit_write(&pmp->trans_lock);
+	hammer2_lk_unlock(&pmp->trans_lock);
 }
 
 /*
@@ -1094,7 +1105,7 @@ hammer2_xop_inode_flush(hammer2_xop_t *arg, int clindex)
 	struct vnode *devvp;
 	struct buf *bp;
 	int flush_error = 0, fsync_error = 0, total_error = 0, vol_error = 0;
-	int j, xflags, ispfsroot = 0;
+	int j, xflags, force, ispfsroot = 0;
 	daddr_t blkno;
 
 	xflags = HAMMER2_FLUSH_TOP;
@@ -1252,7 +1263,9 @@ hammer2_xop_inode_flush(hammer2_xop_t *arg, int clindex)
 	if (fsync_error == 0 && flush_error == 0 &&
 	    (hmp->vchain.flags & HAMMER2_CHAIN_VOLUMESYNC)) {
 		/* Synchronize the disk before flushing the volume header. */
-		/* XXX BUF_CMD_FLUSH / BIO_FLUSH equivalent in OpenBSD */
+		force = 1;
+		fsync_error = VOP_IOCTL(hmp->devvp, DIOCCACHESYNC, &force,
+		    FWRITE, FSCRED, curproc);
 
 		/*
 		 * Then we can safely flush the version of the

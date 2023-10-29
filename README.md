@@ -3,13 +3,13 @@ OpenBSD [HAMMER2](https://gitweb.dragonflybsd.org/dragonfly.git/blob/HEAD:/sys/v
 
 ## Requirements
 
-+ OpenBSD 7.3
++ OpenBSD 7.4
 
 + src tree under /usr/src
 
 ## OpenBSD build
 
-1. Apply [patch/openbsd73.patch](patch/openbsd73.patch) against /usr/src.
+1. Apply [patch/openbsd74.patch](patch/openbsd74.patch) against /usr/src.
 
 2. Run *make prep* to create symlinks under /usr/src/sys which point to this repository. Run *make unprep* to undo.
 

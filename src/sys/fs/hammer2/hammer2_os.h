@@ -64,12 +64,23 @@
 #endif
 
 /* hammer2_lk is lockmgr(9) in DragonFly. */
+/* mutex(9) is spinlock in OpenBSD. */
 typedef struct rwlock hammer2_lk_t;
 
 #define hammer2_lk_init(p, s)		rw_init(p, s)
 #define hammer2_lk_ex(p)		rw_enter_write(p)
 #define hammer2_lk_unlock(p)		rw_exit_write(p)
 #define hammer2_lk_destroy(p)		do {} while (0)
+
+#define hammer2_lk_assert_ex(p)		KASSERT(rw_status(p) == RW_WRITE)
+#define hammer2_lk_assert_unlocked(p)	KASSERT(rw_status(p) == 0)
+
+typedef char * hammer2_lkc_t;
+
+#define hammer2_lkc_init(c, s)		do { *(c) = kstrdup(s); } while (0)
+#define hammer2_lkc_destroy(c)		kstrfree(*(c))
+#define hammer2_lkc_sleep(c, p, s)	rwsleep(*(c), p, PCATCH, *(c), 0)
+#define hammer2_lkc_wakeup(c)		wakeup(*(c))
 
 /*
  * Mutex and spinlock shims.
@@ -78,7 +89,6 @@ typedef struct rwlock hammer2_lk_t;
  */
 typedef struct rrwlock hammer2_mtx_t;
 
-/* Zero on success. */
 #define hammer2_mtx_init(p, s)		rrw_init(p, s)
 #define hammer2_mtx_init_recurse(p, s)	rrw_init(p, s)
 #define hammer2_mtx_ex(p)		rrw_enter(p, RW_WRITE)
@@ -87,8 +97,6 @@ typedef struct rrwlock hammer2_mtx_t;
 #define hammer2_mtx_sh_try(p)		rrw_enter(p, RW_READ|RW_NOSLEEP)
 #define hammer2_mtx_unlock(p)		rrw_exit(p)
 #define hammer2_mtx_destroy(p)		do {} while (0)
-
-#define hammer2_mtx_status(p)		rrw_status(p)
 
 /* Non-zero if exclusively locked by the calling thread. */
 #define hammer2_mtx_owned(p)		(rrw_status(p) == RW_WRITE)
@@ -102,6 +110,7 @@ typedef struct rrwlock hammer2_mtx_t;
 static __inline int
 hammer2_mtx_upgrade_try(hammer2_mtx_t *p)
 {
+#define hammer2_mtx_status(p)		rrw_status(p)
 	KASSERT(hammer2_mtx_status(p) != 0);
 	KASSERT(hammer2_mtx_status(p) != RW_WRITE);
 
@@ -132,7 +141,6 @@ hammer2_mtx_temp_restore(hammer2_mtx_t *p, int x)
 
 typedef struct rwlock hammer2_spin_t;
 
-/* Zero on success. */
 #define hammer2_spin_init(p, s)		rw_init(p, s)
 #define hammer2_spin_ex(p)		rw_enter(p, RW_WRITE)
 #define hammer2_spin_sh(p)		rw_enter(p, RW_READ)

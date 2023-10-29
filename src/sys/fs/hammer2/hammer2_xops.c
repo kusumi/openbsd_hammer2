@@ -565,6 +565,61 @@ done:
 }
 
 /*
+ * Generic scan
+ *
+ * WARNING! Fed chains must be locked shared so ownership can be transfered
+ *	    and to prevent frontend/backend stalls that would occur with an
+ *	    exclusive lock.  The shared lock also allows chain->data to be
+ *	    retained.
+ */
+void
+hammer2_xop_scanall(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_scanall_t *xop = &arg->xop_scanall;
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next;
+	int error = 0;
+
+	/* Assert required flags. */
+	KKASSERT(xop->resolve_flags & HAMMER2_RESOLVE_SHARED);
+	KKASSERT(xop->lookup_flags & HAMMER2_LOOKUP_SHARED);
+
+	/*
+	 * The inode's chain is the iterator.  If we cannot acquire it our
+	 * contribution ends here.
+	 */
+	parent = hammer2_inode_chain(xop->head.ip1, clindex,
+	    xop->resolve_flags);
+	if (parent == NULL) {
+		hprintf("NULL parent\n");
+		goto done;
+	}
+
+	/*
+	 * Generic scan of exact records.  Note that indirect blocks are
+	 * automatically recursed and will not be returned.
+	 */
+	chain = hammer2_chain_lookup(&parent, &key_next, xop->key_beg,
+	    xop->key_end, &error, xop->lookup_flags);
+	while (chain) {
+		error = hammer2_xop_feed(&xop->head, chain, clindex, 0);
+		if (error)
+			goto break2;
+		chain = hammer2_chain_next(&parent, chain, &key_next, key_next,
+		    xop->key_end, &error, xop->lookup_flags);
+	}
+break2:
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+	}
+	hammer2_chain_unlock(parent);
+	hammer2_chain_drop(parent);
+done:
+	hammer2_xop_feed(&xop->head, NULL, clindex, error);
+}
+
+/*
  * Helper to create a directory entry.
  */
 void
@@ -855,6 +910,46 @@ hammer2_xop_inode_destroy(hammer2_xop_t *arg, int clindex)
 	hammer2_chain_delete(parent, chain, xop->head.mtid, 0);
 	error = 0;
 done:
+	hammer2_xop_feed(&xop->head, NULL, clindex, error);
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+	}
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+	}
+}
+
+void
+hammer2_xop_inode_unlinkall(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_unlinkall_t *xop = &arg->xop_unlinkall;
+	hammer2_chain_t *parent, *chain;
+	hammer2_key_t key_next;
+	int error;
+
+	/* We need the precise parent chain to issue the deletion. */
+	parent = hammer2_inode_chain(xop->head.ip1, clindex,
+	    HAMMER2_RESOLVE_ALWAYS);
+	chain = NULL;
+	if (parent == NULL) {
+		error = 0;
+		goto done;
+	}
+	chain = hammer2_chain_lookup(&parent, &key_next, xop->key_beg,
+	    xop->key_end, &error, HAMMER2_LOOKUP_ALWAYS);
+	while (chain) {
+		hammer2_chain_delete(parent, chain, xop->head.mtid,
+		    HAMMER2_DELETE_PERMANENT);
+		hammer2_xop_feed(&xop->head, chain, clindex, chain->error);
+		/* Depend on function to unlock the shared lock. */
+		chain = hammer2_chain_next(&parent, chain, &key_next, key_next,
+		    xop->key_end, &error, HAMMER2_LOOKUP_ALWAYS);
+	}
+done:
+	if (error == 0)
+		error = HAMMER2_ERROR_ENOENT;
 	hammer2_xop_feed(&xop->head, NULL, clindex, error);
 	if (parent) {
 		hammer2_chain_unlock(parent);

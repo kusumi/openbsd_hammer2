@@ -213,8 +213,8 @@ struct hammer2_chain {
 	TAILQ_ENTRY(hammer2_chain) entry;	/* 0-refs LRU */
 	hammer2_mtx_t		lock;
 	hammer2_mtx_t		diolk;		/* xop focus interlock */
-	struct rwlock		inp_lock;
-	char			*inp_cv;
+	hammer2_lk_t		inp_lock;
+	hammer2_lkc_t		inp_cv;
 	hammer2_chain_core_t	core;
 	hammer2_blockref_t	bref;
 	hammer2_dev_t		*hmp;
@@ -440,6 +440,7 @@ struct hammer2_inode {
 	hammer2_depend_t	*depend;	/* non-NULL if SIDEQ */
 	hammer2_depend_t	depend_static;	/* (in-place allocation) */
 	hammer2_mtx_t		lock;		/* inode lock */
+	hammer2_mtx_t		truncate_lock;	/* prevent truncates */
 	struct rrwlock		vnlock;		/* vnode lock */
 	hammer2_spin_t		cluster_spin;	/* update cluster */
 	hammer2_cluster_t	cluster;
@@ -504,7 +505,6 @@ struct hammer2_inode {
  */
 struct hammer2_trans {
 	uint32_t		flags;
-	uint32_t		sync_wait; /* unused */
 };
 
 typedef struct hammer2_trans hammer2_trans_t;
@@ -616,6 +616,14 @@ struct hammer2_xop_scanlhc {
 	hammer2_key_t		lhc;
 };
 
+struct hammer2_xop_scanall {
+	hammer2_xop_head_t	head;
+	hammer2_key_t		key_beg;	/* inclusive */
+	hammer2_key_t		key_end;	/* inclusive */
+	int			resolve_flags;
+	int			lookup_flags;
+};
+
 struct hammer2_xop_lookup {
 	hammer2_xop_head_t	head;
 	hammer2_key_t		lhc;
@@ -654,6 +662,12 @@ struct hammer2_xop_fsync {
 	int			clear_directdata;
 };
 
+struct hammer2_xop_unlinkall {
+	hammer2_xop_head_t	head;
+	hammer2_key_t		key_beg;
+	hammer2_key_t		key_end;
+};
+
 struct hammer2_xop_flush {
 	hammer2_xop_head_t	head;
 };
@@ -669,12 +683,14 @@ typedef struct hammer2_xop_readdir hammer2_xop_readdir_t;
 typedef struct hammer2_xop_nresolve hammer2_xop_nresolve_t;
 typedef struct hammer2_xop_unlink hammer2_xop_unlink_t;
 typedef struct hammer2_xop_scanlhc hammer2_xop_scanlhc_t;
+typedef struct hammer2_xop_scanall hammer2_xop_scanall_t;
 typedef struct hammer2_xop_lookup hammer2_xop_lookup_t;
 typedef struct hammer2_xop_mkdirent hammer2_xop_mkdirent_t;
 typedef struct hammer2_xop_create hammer2_xop_create_t;
 typedef struct hammer2_xop_destroy hammer2_xop_destroy_t;
 typedef struct hammer2_xop_bmap hammer2_xop_bmap_t;
 typedef struct hammer2_xop_fsync hammer2_xop_fsync_t;
+typedef struct hammer2_xop_unlinkall hammer2_xop_unlinkall_t;
 typedef struct hammer2_xop_flush hammer2_xop_flush_t;
 typedef struct hammer2_xop_strategy hammer2_xop_strategy_t;
 
@@ -685,12 +701,14 @@ union hammer2_xop {
 	hammer2_xop_nresolve_t	xop_nresolve;
 	hammer2_xop_unlink_t	xop_unlink;
 	hammer2_xop_scanlhc_t	xop_scanlhc;
+	hammer2_xop_scanall_t	xop_scanall;
 	hammer2_xop_lookup_t	xop_lookup;
 	hammer2_xop_mkdirent_t	xop_mkdirent;
 	hammer2_xop_create_t	xop_create;
 	hammer2_xop_destroy_t	xop_destroy;
 	hammer2_xop_bmap_t	xop_bmap;
 	hammer2_xop_fsync_t	xop_fsync;
+	hammer2_xop_unlinkall_t	xop_unlinkall;
 	hammer2_xop_flush_t	xop_flush;
 	hammer2_xop_strategy_t	xop_strategy;
 };
@@ -824,10 +842,10 @@ struct hammer2_pfs {
 	hammer2_spin_t		inum_spin;	/* inumber lookup */
 	hammer2_spin_t		lru_spin;
 	hammer2_spin_t		list_spin;
-	struct rwlock		xop_lock[HAMMER2_IHASH_SIZE];
-	char			*xop_cv[HAMMER2_IHASH_SIZE];
-	struct rwlock		trans_lock;	/* XXX temporary */
-	char			*trans_cv;
+	hammer2_lk_t		xop_lock[HAMMER2_IHASH_SIZE];
+	hammer2_lkc_t		xop_cv[HAMMER2_IHASH_SIZE];
+	hammer2_lk_t		trans_lock;	/* XXX temporary */
+	hammer2_lkc_t		trans_cv;
 	struct mount		*mp;
 	struct uuid		pfs_clid;
 	hammer2_trans_t		trans;
@@ -896,6 +914,7 @@ extern hammer2_xop_desc_t hammer2_readdir_desc;
 extern hammer2_xop_desc_t hammer2_nresolve_desc;
 extern hammer2_xop_desc_t hammer2_unlink_desc;
 extern hammer2_xop_desc_t hammer2_scanlhc_desc;
+extern hammer2_xop_desc_t hammer2_scanall_desc;
 extern hammer2_xop_desc_t hammer2_lookup_desc;
 extern hammer2_xop_desc_t hammer2_delete_desc;
 extern hammer2_xop_desc_t hammer2_inode_mkdirent_desc;
@@ -905,6 +924,7 @@ extern hammer2_xop_desc_t hammer2_inode_create_ins_desc;
 extern hammer2_xop_desc_t hammer2_inode_destroy_desc;
 extern hammer2_xop_desc_t hammer2_bmap_desc;
 extern hammer2_xop_desc_t hammer2_inode_chain_sync_desc;
+extern hammer2_xop_desc_t hammer2_inode_unlinkall_desc;
 extern hammer2_xop_desc_t hammer2_inode_flush_desc;
 extern hammer2_xop_desc_t hammer2_strategy_read_desc;
 
@@ -918,6 +938,8 @@ int hammer2_xop_feed(hammer2_xop_head_t *, hammer2_chain_t *, int, int);
 int hammer2_xop_collect(hammer2_xop_head_t *, int);
 
 /* hammer2_bulkfree.c */
+void hammer2_bulkfree_init(hammer2_dev_t *);
+void hammer2_bulkfree_uninit(hammer2_dev_t *);
 int hammer2_bulkfree_pass(hammer2_dev_t *, hammer2_chain_t *,
     struct hammer2_ioc_bulkfree *);
 
@@ -973,6 +995,7 @@ void hammer2_cluster_rehold(hammer2_cluster_t *);
 int hammer2_cluster_check(hammer2_cluster_t *, hammer2_key_t, int);
 
 /* hammer2_flush.c */
+void hammer2_trans_manage_init(hammer2_pfs_t *);
 void hammer2_trans_init(hammer2_pfs_t *, uint32_t);
 void hammer2_trans_setflags(hammer2_pfs_t *, uint32_t);
 void hammer2_trans_clearflags(hammer2_pfs_t *, uint32_t);
@@ -1064,6 +1087,7 @@ int hammer2_get_dtype(uint8_t);
 int hammer2_get_vtype(uint8_t);
 uint8_t hammer2_get_obj_type(uint8_t);
 void hammer2_time_to_timespec(uint64_t, struct timespec *);
+uint64_t hammer2_timespec_to_time(const struct timespec *);
 uint32_t hammer2_to_unix_xid(const struct uuid *);
 void hammer2_guid_to_uuid(struct uuid *, uint32_t);
 hammer2_key_t hammer2_dirhash(const char *, size_t);
@@ -1100,6 +1124,7 @@ void hammer2_xop_readdir(hammer2_xop_t *, int);
 void hammer2_xop_nresolve(hammer2_xop_t *, int);
 void hammer2_xop_unlink(hammer2_xop_t *, int);
 void hammer2_xop_scanlhc(hammer2_xop_t *, int);
+void hammer2_xop_scanall(hammer2_xop_t *, int);
 void hammer2_xop_lookup(hammer2_xop_t *, int);
 void hammer2_xop_delete(hammer2_xop_t *, int);
 void hammer2_xop_inode_mkdirent(hammer2_xop_t *, int);
@@ -1109,6 +1134,7 @@ void hammer2_xop_inode_create_ins(hammer2_xop_t *, int);
 void hammer2_xop_inode_destroy(hammer2_xop_t *, int);
 void hammer2_xop_bmap(hammer2_xop_t *, int);
 void hammer2_xop_inode_chain_sync(hammer2_xop_t *, int);
+void hammer2_xop_inode_unlinkall(hammer2_xop_t *, int);
 
 /* XXX no way to return multiple errnos */
 static __inline int
