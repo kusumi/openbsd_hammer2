@@ -38,17 +38,16 @@
 #ifndef _FS_HAMMER2_COMPAT_H_
 #define _FS_HAMMER2_COMPAT_H_
 
+#include <sys/param.h>
+#include <sys/systm.h>
 #include <sys/cdefs.h>
 #include <sys/stdint.h>
 #include <sys/atomic.h>
-#include <sys/rwlock.h>
 
 #include <machine/cpufunc.h>
 
 /* Taken from sys/sys/cdefs.h in FreeBSD. */
-#ifndef __DECONST
 #define __DECONST(type, var)	((type)(__uintptr_t)(const void *)(var))
-#endif
 
 /* Emulate INVARIANTS in FreeBSD. */
 #if 1

@@ -303,9 +303,9 @@ hammer2_ioctl_pfs_create(hammer2_inode_t *ip, void *data)
 		 * "boot", the boot loader can't decompress (yet).
 		 */
 		nip->meta.comp_algo =
-		    HAMMER2_ENC_ALGO(HAMMER2_COMP_NEWFS_DEFAULT);
+		    HAMMER2_ENC_ALGO(HAMMER2_COMP_DEFAULT);
 		nip->meta.check_algo =
-		    HAMMER2_ENC_ALGO( HAMMER2_CHECK_XXHASH64);
+		    HAMMER2_ENC_ALGO(HAMMER2_CHECK_DEFAULT);
 
 		//if (strcasecmp(pfs->name, "boot") == 0)
 		if (strcmp(pfs->name, "boot") == 0 ||

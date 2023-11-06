@@ -143,8 +143,8 @@ hammer2_mkfs_init(hammer2_mkfs_options_t *opt)
 
 	opt->Hammer2Version = get_hammer2_version();
 	opt->Label[opt->NLabels++] = strdup("LOCAL");
-	opt->CompType = HAMMER2_COMP_NEWFS_DEFAULT; /* LZ4 */
-	opt->CheckType = HAMMER2_CHECK_XXHASH64;
+	opt->CompType = HAMMER2_COMP_DEFAULT; /* LZ4 */
+	opt->CheckType = HAMMER2_CHECK_DEFAULT; /* xxhash64 */
 	opt->DefaultLabelType = HAMMER2_LABEL_NONE;
 
 	/*
@@ -420,7 +420,7 @@ format_hammer2_inode(hammer2_volume_t *vol, hammer2_mkfs_options_t *opt,
 			rawip->meta.comp_algo = HAMMER2_ENC_ALGO(
 						    opt->CompType);
 			rawip->meta.check_algo = HAMMER2_ENC_ALGO(
-						    HAMMER2_CHECK_XXHASH64);
+						    opt->CheckType);
 		}
 
 		/*

@@ -43,7 +43,6 @@
 #include <sys/proc.h>
 #include <sys/rwlock.h>
 
-/* printf(9) variants for HAMMER2 */
 #ifdef INVARIANTS
 #define HFMT	"%s(%s|%d): "
 #define HARGS	__func__, \
@@ -75,12 +74,12 @@ typedef struct rwlock hammer2_lk_t;
 #define hammer2_lk_assert_ex(p)		KASSERT(rw_status(p) == RW_WRITE)
 #define hammer2_lk_assert_unlocked(p)	KASSERT(rw_status(p) == 0)
 
-typedef char * hammer2_lkc_t;
+typedef int hammer2_lkc_t;
 
-#define hammer2_lkc_init(c, s)		do { *(c) = kstrdup(s); } while (0)
-#define hammer2_lkc_destroy(c)		kstrfree(*(c))
-#define hammer2_lkc_sleep(c, p, s)	rwsleep(*(c), p, PCATCH, *(c), 0)
-#define hammer2_lkc_wakeup(c)		wakeup(*(c))
+#define hammer2_lkc_init(c, s)		do {} while (0)
+#define hammer2_lkc_destroy(c)		do {} while (0)
+#define hammer2_lkc_sleep(c, p, s)	rwsleep(c, p, PCATCH, s, 0)
+#define hammer2_lkc_wakeup(c)		wakeup(c)
 
 /*
  * Mutex and spinlock shims.
@@ -102,10 +101,10 @@ typedef struct rrwlock hammer2_mtx_t;
 #define hammer2_mtx_owned(p)		(rrw_status(p) == RW_WRITE)
 
 /* RW_READ doesn't necessarily mean read locked by calling thread. */
-#define hammer2_mtx_assert_locked(p)	KASSERT(rrw_status(p) == RW_READ || rrw_status(p) == RW_WRITE)
-#define hammer2_mtx_assert_unlocked(p)	KASSERT(rrw_status(p) == 0)
 #define hammer2_mtx_assert_ex(p)	KASSERT(rrw_status(p) == RW_WRITE)
 #define hammer2_mtx_assert_sh(p)	KASSERT(rrw_status(p) == RW_READ)
+#define hammer2_mtx_assert_locked(p)	KASSERT(rrw_status(p) == RW_READ || rrw_status(p) == RW_WRITE)
+#define hammer2_mtx_assert_unlocked(p)	KASSERT(rrw_status(p) == 0)
 
 static __inline int
 hammer2_mtx_upgrade_try(hammer2_mtx_t *p)
@@ -148,9 +147,9 @@ typedef struct rwlock hammer2_spin_t;
 #define hammer2_spin_unsh(p)		rw_exit(p)
 #define hammer2_spin_destroy(p)		do {} while (0)
 
-#define hammer2_spin_assert_locked(p)	rw_assert_anylock(p)
-#define hammer2_spin_assert_unlocked(p)	rw_assert_unlocked(p)
 #define hammer2_spin_assert_ex(p)	rw_assert_wrlock(p)
 #define hammer2_spin_assert_sh(p)	rw_assert_rdlock(p)
+#define hammer2_spin_assert_locked(p)	rw_assert_anylock(p)
+#define hammer2_spin_assert_unlocked(p)	rw_assert_unlocked(p)
 
 #endif /* !_FS_HAMMER2_OS_H_ */

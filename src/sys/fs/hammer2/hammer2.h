@@ -646,14 +646,6 @@ struct hammer2_xop_destroy {
 	hammer2_xop_head_t	head;
 };
 
-struct hammer2_xop_bmap {
-	hammer2_xop_head_t	head;
-	daddr_t			lbn;
-	int			runp;
-	int			runb;
-	hammer2_off_t		offset;
-};
-
 struct hammer2_xop_fsync {
 	hammer2_xop_head_t	head;
 	hammer2_inode_meta_t	meta;
@@ -678,6 +670,14 @@ struct hammer2_xop_strategy {
 	struct buf		*bp;
 };
 
+struct hammer2_xop_bmap {
+	hammer2_xop_head_t	head;
+	daddr_t			lbn;
+	int			runp;
+	int			runb;
+	hammer2_off_t		offset;
+};
+
 typedef struct hammer2_xop_ipcluster hammer2_xop_ipcluster_t;
 typedef struct hammer2_xop_readdir hammer2_xop_readdir_t;
 typedef struct hammer2_xop_nresolve hammer2_xop_nresolve_t;
@@ -688,11 +688,11 @@ typedef struct hammer2_xop_lookup hammer2_xop_lookup_t;
 typedef struct hammer2_xop_mkdirent hammer2_xop_mkdirent_t;
 typedef struct hammer2_xop_create hammer2_xop_create_t;
 typedef struct hammer2_xop_destroy hammer2_xop_destroy_t;
-typedef struct hammer2_xop_bmap hammer2_xop_bmap_t;
 typedef struct hammer2_xop_fsync hammer2_xop_fsync_t;
 typedef struct hammer2_xop_unlinkall hammer2_xop_unlinkall_t;
 typedef struct hammer2_xop_flush hammer2_xop_flush_t;
 typedef struct hammer2_xop_strategy hammer2_xop_strategy_t;
+typedef struct hammer2_xop_bmap hammer2_xop_bmap_t;
 
 union hammer2_xop {
 	hammer2_xop_head_t	head;
@@ -706,11 +706,11 @@ union hammer2_xop {
 	hammer2_xop_mkdirent_t	xop_mkdirent;
 	hammer2_xop_create_t	xop_create;
 	hammer2_xop_destroy_t	xop_destroy;
-	hammer2_xop_bmap_t	xop_bmap;
 	hammer2_xop_fsync_t	xop_fsync;
 	hammer2_xop_unlinkall_t	xop_unlinkall;
 	hammer2_xop_flush_t	xop_flush;
 	hammer2_xop_strategy_t	xop_strategy;
+	hammer2_xop_bmap_t	xop_bmap;
 };
 
 /*
@@ -922,11 +922,11 @@ extern hammer2_xop_desc_t hammer2_inode_create_desc;
 extern hammer2_xop_desc_t hammer2_inode_create_det_desc;
 extern hammer2_xop_desc_t hammer2_inode_create_ins_desc;
 extern hammer2_xop_desc_t hammer2_inode_destroy_desc;
-extern hammer2_xop_desc_t hammer2_bmap_desc;
 extern hammer2_xop_desc_t hammer2_inode_chain_sync_desc;
 extern hammer2_xop_desc_t hammer2_inode_unlinkall_desc;
 extern hammer2_xop_desc_t hammer2_inode_flush_desc;
 extern hammer2_xop_desc_t hammer2_strategy_read_desc;
+extern hammer2_xop_desc_t hammer2_bmap_desc;
 
 /* hammer2_admin.c */
 void *hammer2_xop_alloc(hammer2_inode_t *, int);
@@ -1132,9 +1132,9 @@ void hammer2_xop_inode_create(hammer2_xop_t *, int);
 void hammer2_xop_inode_create_det(hammer2_xop_t *, int);
 void hammer2_xop_inode_create_ins(hammer2_xop_t *, int);
 void hammer2_xop_inode_destroy(hammer2_xop_t *, int);
-void hammer2_xop_bmap(hammer2_xop_t *, int);
 void hammer2_xop_inode_chain_sync(hammer2_xop_t *, int);
 void hammer2_xop_inode_unlinkall(hammer2_xop_t *, int);
+void hammer2_xop_bmap(hammer2_xop_t *, int);
 
 /* XXX no way to return multiple errnos */
 static __inline int

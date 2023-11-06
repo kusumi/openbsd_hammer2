@@ -962,59 +962,6 @@ done:
 }
 
 /*
- * Backend for hammer2_bmap().
- */
-void
-hammer2_xop_bmap(hammer2_xop_t *arg, int clindex)
-{
-	hammer2_xop_bmap_t *xop = &arg->xop_bmap;
-	hammer2_inode_t *ip = xop->head.ip1;
-	hammer2_chain_t *chain, *parent;
-	hammer2_key_t lbase, key_dummy;
-	int error = 0;
-
-	lbase = (hammer2_key_t)xop->lbn * hammer2_get_logical();
-	KKASSERT(((int)lbase & HAMMER2_PBUFMASK) == 0);
-
-	chain = NULL;
-	parent = hammer2_inode_chain(ip, clindex,
-	    HAMMER2_RESOLVE_ALWAYS | HAMMER2_RESOLVE_SHARED);
-	if (parent == NULL) {
-		hprintf("NULL parent\n");
-		error = HAMMER2_ERROR_EIO;
-		goto done;
-	}
-
-	/*
-	 * NULL chain isn't necessarily an error.
-	 * It could be a zero filled data without physical block assigned.
-	 */
-	xop->offset = HAMMER2_OFF_MASK;
-	chain = hammer2_chain_lookup(&parent, &key_dummy, lbase, lbase,
-	    &error, HAMMER2_LOOKUP_ALWAYS | HAMMER2_LOOKUP_SHARED);
-	if (error == 0) {
-		if (chain) {
-			error = chain->error;
-			if (error == 0)
-				xop->offset = chain->bref.data_off &
-				    ~HAMMER2_OFF_MASK_RADIX;
-		} else {
-			error = HAMMER2_ERROR_ENOENT;
-		}
-	}
-done:
-	error = hammer2_xop_feed(&xop->head, chain, clindex, error);
-	if (chain) {
-		hammer2_chain_unlock(chain);
-		hammer2_chain_drop(chain);
-	}
-	if (parent) {
-		hammer2_chain_unlock(parent);
-		hammer2_chain_drop(parent);
-	}
-}
-
-/*
  * Synchronize the in-memory inode with the chain.  This does not flush
  * the chain to disk.  Instead, it makes front-end inode changes visible
  * in the chain topology, thus visible to the backend.  This is done in an
@@ -1103,4 +1050,57 @@ done:
 		hammer2_chain_drop(parent);
 	}
 	hammer2_xop_feed(&xop->head, NULL, clindex, error);
+}
+
+/*
+ * Backend for hammer2_bmap().
+ */
+void
+hammer2_xop_bmap(hammer2_xop_t *arg, int clindex)
+{
+	hammer2_xop_bmap_t *xop = &arg->xop_bmap;
+	hammer2_inode_t *ip = xop->head.ip1;
+	hammer2_chain_t *chain, *parent;
+	hammer2_key_t lbase, key_dummy;
+	int error = 0;
+
+	lbase = (hammer2_key_t)xop->lbn * hammer2_get_logical();
+	KKASSERT(((int)lbase & HAMMER2_PBUFMASK) == 0);
+
+	chain = NULL;
+	parent = hammer2_inode_chain(ip, clindex,
+	    HAMMER2_RESOLVE_ALWAYS | HAMMER2_RESOLVE_SHARED);
+	if (parent == NULL) {
+		hprintf("NULL parent\n");
+		error = HAMMER2_ERROR_EIO;
+		goto done;
+	}
+
+	/*
+	 * NULL chain isn't necessarily an error.
+	 * It could be a zero filled data without physical block assigned.
+	 */
+	xop->offset = HAMMER2_OFF_MASK;
+	chain = hammer2_chain_lookup(&parent, &key_dummy, lbase, lbase,
+	    &error, HAMMER2_LOOKUP_ALWAYS | HAMMER2_LOOKUP_SHARED);
+	if (error == 0) {
+		if (chain) {
+			error = chain->error;
+			if (error == 0)
+				xop->offset = chain->bref.data_off &
+				    ~HAMMER2_OFF_MASK_RADIX;
+		} else {
+			error = HAMMER2_ERROR_ENOENT;
+		}
+	}
+done:
+	error = hammer2_xop_feed(&xop->head, chain, clindex, error);
+	if (chain) {
+		hammer2_chain_unlock(chain);
+		hammer2_chain_drop(chain);
+	}
+	if (parent) {
+		hammer2_chain_unlock(parent);
+		hammer2_chain_drop(parent);
+	}
 }

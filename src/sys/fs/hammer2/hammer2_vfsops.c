@@ -216,8 +216,6 @@ hammer2_pfsalloc(hammer2_chain_t *chain, const hammer2_inode_data_t *ripdata,
 		for (i = 0; i < HAMMER2_IHASH_SIZE; i++) {
 			hammer2_lk_init(&pmp->xop_lock[i], "h2pmp_xoplk");
 			hammer2_lkc_init(&pmp->xop_cv[i], "h2pmp_xoplkc");
-			KKASSERT(i == 0 ||
-			    (pmp->xop_cv[i] != pmp->xop_cv[i-1]));
 		}
 		hammer2_lk_init(&pmp->trans_lock, "h2pmp_trlk");
 		hammer2_lkc_init(&pmp->trans_cv, "h2pmp_trlkc");
@@ -524,6 +522,13 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 		return (EINVAL);
 	}
 
+	/* HMNT2_LOCAL is not allowed, it's already broken in DragonFly. */
+	if (args->hflags & HMNT2_LOCAL) {
+		hprintf("HMNT2_LOCAL is not allowed\n");
+		return (EINVAL);
+	}
+	KKASSERT((args->hflags & HMNT2_LOCAL) == 0);
+
 	if (mp->mnt_flag & MNT_UPDATE) {
 		/*
 		 * Update mount.  Note that pmp->iroot->cluster is
@@ -563,9 +568,6 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 	}
 	/* Note that path is already in kernel space. */
 	debug_hprintf("devstr \"%s\" mntpt \"%s\"\n", devstr, path);
-
-	/* HMNT2_LOCAL is not allowed, it's already broken in DragonFly. */
-	KKASSERT((args->hflags & HMNT2_LOCAL) == 0);
 
 	/*
 	 * Extract device and label, automatically mount @DATA if no label
@@ -1823,6 +1825,13 @@ restart:
 			}
 			vput(vp);
 			hammer2_inode_vdrop_all(ip);
+			/* OpenBSD mknod specific, not a must to begin with. */
+			/*
+			if (vp->v_type == VFIFO) {
+				vp->v_type = VNON;
+				vgone(vp);
+			}
+			*/
 			vp = NULL; /* safety */
 		}
 		atomic_clear_int(&ip->flags, HAMMER2_INODE_SYNCQ_PASS2);

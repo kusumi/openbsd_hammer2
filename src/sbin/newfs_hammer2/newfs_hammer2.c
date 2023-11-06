@@ -42,6 +42,7 @@
 #include <stddef.h>
 #include <unistd.h>
 #include <string.h>
+#include <assert.h>
 #include <err.h>
 
 #include "mkfs_hammer2.h"
@@ -136,6 +137,8 @@ main(int ac, char **av)
 	/*
 	 * Create Hammer2 filesystem.
 	 */
+	assert(opt.CompType == HAMMER2_COMP_DEFAULT);
+	assert(opt.CheckType == HAMMER2_CHECK_DEFAULT);
 	hammer2_mkfs(ac, av, &opt);
 
 	/*

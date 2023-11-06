@@ -74,14 +74,6 @@
 
 #include "hammer2_subs.h"
 
-/* user-specifiable check modes only */
-#define HAMMER2_CHECK_STRINGS		{ "none", "disabled", "crc32", \
-					  "xxhash64", "sha192" }
-#define HAMMER2_CHECK_STRINGS_COUNT	5
-
-#define HAMMER2_COMP_STRINGS		{ "none", "autozero", "lz4", "zlib" }
-#define HAMMER2_COMP_STRINGS_COUNT	4
-
 extern int VerboseOpt;
 extern int QuietOpt;
 extern int RecurseOpt;
