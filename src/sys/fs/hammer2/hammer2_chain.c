@@ -1269,6 +1269,92 @@ hammer2_chain_countbrefs(hammer2_chain_t *chain, hammer2_blockref_t *base,
 }
 
 /*
+ * Resize the chain's physical storage allocation in-place.  This function does
+ * not usually adjust the data pointer and must be followed by (typically) a
+ * hammer2_chain_modify() call to copy any old data over and adjust the
+ * data pointer.
+ *
+ * Chains can be resized smaller without reallocating the storage.  Resizing
+ * larger will reallocate the storage.  Excess or prior storage is reclaimed
+ * asynchronously at a later time.
+ *
+ * An nradix value of 0 is special-cased to mean that the storage should
+ * be disassociated, that is the chain is being resized to 0 bytes (not 1
+ * byte).
+ *
+ * Must be passed an exclusively locked parent and chain.
+ *
+ * This function is mostly used with DATA blocks locked RESOLVE_NEVER in order
+ * to avoid instantiating a device buffer that conflicts with the vnode data
+ * buffer.  However, because H2 can compress or encrypt data, the chain may
+ * have a dio assigned to it in those situations, and they do not conflict.
+ *
+ * XXX return error if cannot resize.
+ */
+int
+hammer2_chain_resize(hammer2_chain_t *chain, hammer2_tid_t mtid,
+    hammer2_off_t dedup_off, int nradix, int flags)
+{
+	size_t obytes, nbytes;
+	int error;
+
+	/*
+	 * Only data and indirect blocks can be resized for now.
+	 * (The volu root, inodes, and freemap elements use a fixed size).
+	 */
+	KKASSERT(chain != &chain->hmp->vchain);
+	KKASSERT(chain->bref.type == HAMMER2_BREF_TYPE_DATA ||
+	    chain->bref.type == HAMMER2_BREF_TYPE_INDIRECT ||
+	    chain->bref.type == HAMMER2_BREF_TYPE_DIRENT);
+
+	/* Nothing to do if the element is already the proper size. */
+	obytes = chain->bytes;
+	nbytes = (nradix) ? (1U << nradix) : 0;
+	if (obytes == nbytes)
+		return (chain->error);
+
+	/*
+	 * Make sure the old data is instantiated so we can copy it.  If this
+	 * is a data block, the device data may be superfluous since the data
+	 * might be in a logical block, but compressed or encrypted data is
+	 * another matter.
+	 *
+	 * NOTE: The modify will set BLKMAPUPD for us if BLKMAPPED is set.
+	 */
+	error = hammer2_chain_modify(chain, mtid, dedup_off, 0);
+	if (error)
+		return (error);
+
+	/*
+	 * Reallocate the block, even if making it smaller (because different
+	 * block sizes may be in different regions).
+	 *
+	 * NOTE: Operation does not copy the data and may only be used
+	 *	 to resize data blocks in-place, or directory entry blocks
+	 *	 which are about to be modified in some manner.
+	 */
+	error = hammer2_freemap_alloc(chain, nbytes);
+	if (error)
+		return (error);
+
+	chain->bytes = nbytes;
+
+	/*
+	 * We don't want the followup chain_modify() to try to copy data
+	 * from the old (wrong-sized) buffer.  It won't know how much to
+	 * copy.  This case should only occur during writes when the
+	 * originator already has the data to write in-hand.
+	 */
+	if (chain->dio) {
+		KKASSERT(chain->bref.type == HAMMER2_BREF_TYPE_DATA ||
+		    chain->bref.type == HAMMER2_BREF_TYPE_DIRENT);
+		hammer2_io_brelse(&chain->dio);
+		chain->data = NULL;
+	}
+	return (chain->error);
+}
+
+/*
  * Set the chain modified so its data can be changed by the caller, or
  * install deduplicated data.  The caller must call this routine for each
  * set of modifications it makes, even if the chain is already flagged

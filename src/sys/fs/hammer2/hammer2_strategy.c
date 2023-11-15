@@ -172,7 +172,6 @@ hammer2_strategy_read(struct vop_strategy_args *ap)
 	xop->bp = bp;
 	xop->lbase = lbase;
 	hammer2_xop_start(&xop->head, &hammer2_strategy_read_desc);
-
 	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 
 	return (0);

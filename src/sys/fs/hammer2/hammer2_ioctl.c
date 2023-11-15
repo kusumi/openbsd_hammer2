@@ -422,9 +422,9 @@ hammer2_ioctl_pfs_delete(hammer2_inode_t *ip, void *data)
 	hammer2_xop_start(&xop->head, &hammer2_unlink_desc);
 	error = hammer2_xop_collect(&xop->head, 0);
 	error = hammer2_error_to_errno(error);
+	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 
 	hammer2_inode_unlock(dip);
-	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 	hammer2_trans_done(spmp, HAMMER2_TRANS_SIDEQ);
 
 	return (error);
@@ -781,7 +781,6 @@ hammer2_ioctl_bulkfree_scan(hammer2_inode_t *ip, void *data)
 	 */
 	if (didsnap == 0)
 		hammer2_trans_init(hmp->spmp, HAMMER2_TRANS_ISFLUSH);
-
 	error = hammer2_bulkfree_pass(hmp, vchain, bfi);
 	if (didsnap) {
 		hammer2_chain_bulkdrop(vchain);
@@ -841,9 +840,9 @@ hammer2_ioctl_destroy(hammer2_inode_t *ip, void *data)
 		hammer2_xop_start(&xop->head, &hammer2_unlink_desc);
 		error = hammer2_xop_collect(&xop->head, 0);
 		error = hammer2_error_to_errno(error);
+		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 
 		hammer2_inode_unlock(ip);
-		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 		hammer2_trans_done(pmp, HAMMER2_TRANS_SIDEQ);
 		}
 		break;
@@ -863,8 +862,8 @@ hammer2_ioctl_destroy(hammer2_inode_t *ip, void *data)
 		hammer2_xop_start(&xop->head, &hammer2_delete_desc);
 		error = hammer2_xop_collect(&xop->head, 0);
 		error = hammer2_error_to_errno(error);
-
 		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+
 		hammer2_trans_done(pmp, HAMMER2_TRANS_SIDEQ);
 		}
 		break;

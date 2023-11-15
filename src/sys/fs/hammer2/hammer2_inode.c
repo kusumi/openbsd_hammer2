@@ -817,7 +817,6 @@ hammer2_inode_create_pfs(hammer2_pfs_t *spmp, const char *name, size_t name_len,
 		++lhc;
 	}
 	hammer2_xop_retire(&sxop->head, HAMMER2_XOPMASK_VOP);
-
 	if (error) {
 		if (error != HAMMER2_ERROR_ENOENT)
 			goto done2;
@@ -834,11 +833,9 @@ hammer2_inode_create_pfs(hammer2_pfs_t *spmp, const char *name, size_t name_len,
 	xop->lhc = lhc;
 	xop->flags = HAMMER2_INSERT_PFSROOT;
 	bzero(&xop->meta, sizeof(xop->meta));
-
 	xop->meta.type = HAMMER2_OBJTYPE_DIRECTORY;
 	xop->meta.inum = 1;
 	xop->meta.iparent = pip_inum;
-
 	/* Inherit parent's inode compression mode. */
 	xop->meta.comp_algo = pip_comp_algo;
 	xop->meta.check_algo = pip_check_algo;
@@ -847,7 +844,6 @@ hammer2_inode_create_pfs(hammer2_pfs_t *spmp, const char *name, size_t name_len,
 	xop->meta.mtime = xop->meta.ctime;
 	xop->meta.mode = 0755;
 	xop->meta.nlinks = 1;
-
 	/*
 	 * Regular files and softlinks allow a small amount of data to be
 	 * directly embedded in the inode.  This flag will be cleared if
@@ -860,9 +856,7 @@ hammer2_inode_create_pfs(hammer2_pfs_t *spmp, const char *name, size_t name_len,
 	xop->meta.name_len = name_len;
 	xop->meta.name_key = lhc;
 	KKASSERT(name_len < HAMMER2_INODE_MAXNAME);
-
 	hammer2_xop_start(&xop->head, &hammer2_inode_create_desc);
-
 	error = hammer2_xop_collect(&xop->head, 0);
 	if (error) {
 		*errorp = error;
@@ -983,14 +977,11 @@ hammer2_inode_create_normal(hammer2_inode_t *pip, struct vattr *vap,
 	xop->lhc = inum;
 	xop->flags = 0;
 	xop->meta = nip->meta;
-	KKASSERT(vap);
-
 	xop->meta.name_len = hammer2_xop_setname_inum(&xop->head, inum);
 	xop->meta.name_key = inum;
 	nip->meta.name_len = xop->meta.name_len;
 	nip->meta.name_key = xop->meta.name_key;
 	hammer2_inode_modify(nip);
-
 	/*
 	 * Create the inode media chains but leave them detached.  We are
 	 * not in a flush transaction so we can't mess with media topology
@@ -1082,13 +1073,10 @@ hammer2_dirent_create(hammer2_inode_t *dip, const char *name, size_t name_len,
 	xop->dirent.inum = inum;
 	xop->dirent.type = type;
 	xop->dirent.namlen = name_len;
-
 	KKASSERT(name_len < HAMMER2_INODE_MAXNAME);
 	hammer2_xop_setname(&xop->head, name, name_len);
-
 	hammer2_xop_start(&xop->head, &hammer2_inode_mkdirent_desc);
 	error = hammer2_xop_collect(&xop->head, 0);
-
 	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 done2:
 	return (hammer2_error_to_errno(error));
@@ -1415,7 +1403,6 @@ hammer2_inode_chain_sync(hammer2_inode_t *ip)
 		}
 		xop->ipflags = ip->flags;
 		xop->meta = ip->meta;
-
 		atomic_clear_int(&ip->flags,
 		    HAMMER2_INODE_RESIZED | HAMMER2_INODE_MODIFIED);
 		hammer2_xop_start(&xop->head, &hammer2_inode_chain_sync_desc);
@@ -1451,7 +1438,6 @@ hammer2_inode_chain_ins(hammer2_inode_t *ip)
 		hammer2_xop_start(&xop->head, &hammer2_inode_create_ins_desc);
 		error = hammer2_xop_collect(&xop->head, 0);
 		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
-
 		if (error == HAMMER2_ERROR_ENOENT)
 			error = 0;
 		if (error) {
@@ -1488,7 +1474,6 @@ hammer2_inode_chain_des(hammer2_inode_t *ip)
 		hammer2_xop_start(&xop->head, &hammer2_inode_destroy_desc);
 		error = hammer2_xop_collect(&xop->head, 0);
 		hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
-
 		if (error == HAMMER2_ERROR_ENOENT)
 			error = 0;
 		if (error) {
