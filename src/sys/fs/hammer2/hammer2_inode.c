@@ -222,10 +222,8 @@ hammer2_inode_lock(hammer2_inode_t *ip, int how)
 	 * across the tsleep() to avoid a deadlock.
 	 */
 	hammer2_mtx_ex(&ip->lock);
-	/* XXX2
 	if (hammer2_mtx_refs(&ip->lock) > 1)
 		return;
-	*/
 	while ((ip->flags & HAMMER2_INODE_SYNCQ) && pmp) {
 		hammer2_spin_ex(&pmp->list_spin);
 		if (ip->flags & HAMMER2_INODE_SYNCQ) {
@@ -497,6 +495,20 @@ hammer2_inode_ref(hammer2_inode_t *ip)
 	atomic_add_int(&ip->refs, 1);
 }
 
+static void
+hammer2_inode_drop_assert(hammer2_inode_t *ip)
+{
+	int refs;
+
+	refs = hammer2_mtx_refs(&ip->lock);
+	if (refs) {
+		hprintf("XXX inum %016jx mtx_refs %d mtx_owned %d\n",
+		    (intmax_t)ip->meta.inum, refs,
+		    hammer2_mtx_owned(&ip->lock));
+		KKASSERT(ip->meta.inum == 1); /* XXX2 */
+	}
+}
+
 /*
  * Drop an inode reference, freeing the inode when the last reference goes
  * away.
@@ -522,6 +534,8 @@ hammer2_inode_drop(hammer2_inode_t *ip)
 			hammer2_spin_ex(&pmp->inum_spin);
 
 			if (atomic_cmpset_int(&ip->refs, 1, 0)) {
+				//KKASSERT(hammer2_mtx_refs(&ip->lock) == 0);
+				hammer2_inode_drop_assert(ip);
 				if (ip->flags & HAMMER2_INODE_ONRBTREE) {
 					atomic_clear_int(&ip->flags,
 					    HAMMER2_INODE_ONRBTREE);
@@ -537,6 +551,8 @@ hammer2_inode_drop(hammer2_inode_t *ip)
 				 */
 				hammer2_inode_repoint(ip, NULL);
 				hammer2_mtx_destroy(&ip->lock);
+				hammer2_mtx_destroy(&ip->truncate_lock);
+				hammer2_mtx_destroy(&ip->vhold_lock);
 				hammer2_spin_destroy(&ip->cluster_spin);
 				/* ip->vhold isn't necessarily zero. */
 
@@ -742,6 +758,7 @@ again:
 	nip->refs = 1;
 	hammer2_mtx_init_recurse(&nip->lock, "h2ip_lk");
 	hammer2_mtx_init(&nip->truncate_lock, "h2ip_trlk");
+	hammer2_mtx_init(&nip->vhold_lock, "h2ip_vhlk");
 	rrw_init_flags(&nip->vnlock, "h2vn_lk", RWL_DUPOK | RWL_IS_VNODE);
 	hammer2_mtx_ex(&nip->lock);
 	TAILQ_INIT(&nip->depend_static.sideq);
@@ -844,14 +861,6 @@ hammer2_inode_create_pfs(hammer2_pfs_t *spmp, const char *name, size_t name_len,
 	xop->meta.mtime = xop->meta.ctime;
 	xop->meta.mode = 0755;
 	xop->meta.nlinks = 1;
-	/*
-	 * Regular files and softlinks allow a small amount of data to be
-	 * directly embedded in the inode.  This flag will be cleared if
-	 * the size is extended past the embedded limit.
-	 */
-	if (xop->meta.type == HAMMER2_OBJTYPE_REGFILE ||
-	    xop->meta.type == HAMMER2_OBJTYPE_SOFTLINK)
-		xop->meta.op_flags |= HAMMER2_OPFLAG_DIRECTDATA;
 	hammer2_xop_setname(&xop->head, name, name_len);
 	xop->meta.name_len = name_len;
 	xop->meta.name_key = lhc;
@@ -875,7 +884,7 @@ hammer2_inode_create_pfs(hammer2_pfs_t *spmp, const char *name, size_t name_len,
 	 * NOTE: nipdata will have chain's blockset data.
 	 */
 	nip = hammer2_inode_get(pip->pmp, &xop->head, -1, -1);
-	//nip->comp_heuristic = 0;
+	nip->comp_heuristic = 0;
 done:
 	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
 done2:
@@ -914,7 +923,7 @@ hammer2_inode_create_normal(hammer2_inode_t *pip, struct vattr *vap,
 
 	/* Create the in-memory inode structure for the specified inode. */
 	nip = hammer2_inode_get(dip->pmp, NULL, inum, -1);
-	//nip->comp_heuristic = 0;
+	nip->comp_heuristic = 0;
 	KKASSERT((nip->flags & HAMMER2_INODE_CREATING) == 0 &&
 	    nip->cluster.nchains == 0);
 	atomic_set_int(&nip->flags, HAMMER2_INODE_CREATING);
@@ -1023,7 +1032,7 @@ hammer2_dirent_create(hammer2_inode_t *dip, const char *name, size_t name_len,
 {
 	hammer2_xop_mkdirent_t *xop;
 	hammer2_xop_scanlhc_t *sxop;
-	hammer2_key_t lhcbase, lhc = 0;
+	hammer2_key_t lhc, lhcbase;
 	int error = 0;
 
 	KKASSERT(name != NULL);
@@ -1328,49 +1337,49 @@ hammer2_inode_modify(hammer2_inode_t *ip)
 }
 
 /*
- * FreeBSD specific function originally required by NetBSD VFS sync.
+ * This function was originally required by NetBSD VFS sync.
+ * This doesn't exist in DragonFly HAMMER2.
  */
-int
+void
 hammer2_inode_vhold(hammer2_inode_t *ip)
 {
-	struct vnode *vp;
-
-	hammer2_mtx_assert_locked(&ip->lock);
 	KKASSERT(ip->refs > 0);
+	KKASSERT(ip->vhold >= 0);
 
-	vp = ip->vp;
-	if (vp) {
-		vref(vp);
-		ip->vhold++;
-		return (0);
+	/* ip->vp can still be NULL on inode creation. */
+	if (ip->vp) {
+		hammer2_mtx_ex(&ip->vhold_lock);
+		if (ip->vhold == 0) { /* optimization */
+			vref(ip->vp);
+			ip->vhold++;
+		}
+		KKASSERT(ip->vhold > 0);
+		hammer2_mtx_unlock(&ip->vhold_lock);
 	}
-
-	return (1);
 }
 
 /*
- * FreeBSD specific function originally required by NetBSD VFS sync.
+ * This function was originally required by NetBSD VFS sync.
+ * This doesn't exist in DragonFly HAMMER2.
  */
 void
-hammer2_inode_vdrop_all(hammer2_inode_t *ip)
+hammer2_inode_vdrop(hammer2_inode_t *ip, int n)
 {
-	struct vnode *vp;
-	int i, n;
-
-	hammer2_mtx_assert_ex(&ip->lock);
 	KKASSERT(ip->refs > 0);
+	KKASSERT(ip->vhold >= 0);
+	KKASSERT(ip->vp);
 
-	vp = ip->vp;
-	KKASSERT(vp);
+	if (n > ip->vhold)
+		hpanic("arg %d > vhold %d", n, ip->vhold);
 
-	if (ip->vhold > 0) {
-		n = ip->vhold;
-		for (i = 0; i < n; i++) {
-			vrele(vp);
-			ip->vhold--;
-		}
-		KKASSERT(ip->vhold == 0);
+	hammer2_mtx_ex(&ip->vhold_lock);
+	while (n > 0) {
+		vrele(ip->vp);
+		ip->vhold--;
+		n--;
 	}
+	KKASSERT(ip->vhold >= 0);
+	hammer2_mtx_unlock(&ip->vhold_lock);
 }
 
 /*

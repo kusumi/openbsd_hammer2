@@ -1130,8 +1130,7 @@ hammer2_chain_unlock(hammer2_chain_t *chain)
 				hammer2_mtx_unlock(&chain->lock);
 				return;
 			}
-		} else if (hammer2_mtx_owned(&chain->lock) ||
-		    hammer2_mtx_upgrade_try(&chain->lock) == 0) {
+		} else if (hammer2_mtx_upgrade_try(&chain->lock) == 0) {
 			/* While holding the mutex exclusively. */
 			if (atomic_cmpset_int(&chain->lockcnt, 1, 0))
 				break;
@@ -1771,6 +1770,21 @@ skip:
 	hammer2_mtx_unlock(&chain->diolk);
 
 	return (chain->error);
+}
+
+/*
+ * Modify the chain associated with an inode.
+ */
+int
+hammer2_chain_modify_ip(hammer2_inode_t *ip, hammer2_chain_t *chain,
+    hammer2_tid_t mtid, int flags)
+{
+	int error;
+
+	hammer2_inode_modify(ip);
+	error = hammer2_chain_modify(chain, mtid, 0, flags);
+
+	return (error);
 }
 
 /*

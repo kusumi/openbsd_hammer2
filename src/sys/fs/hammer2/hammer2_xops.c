@@ -131,7 +131,7 @@ checkdirempty(hammer2_chain_t *oparent, hammer2_chain_t *ochain, int clindex)
  * to the inode_tid and modify_tid.
  */
 void
-hammer2_xop_ipcluster(hammer2_xop_t *arg, int clindex)
+hammer2_xop_ipcluster(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_ipcluster_t *xop = &arg->xop_ipcluster;
 	hammer2_chain_t *chain;
@@ -155,7 +155,7 @@ hammer2_xop_ipcluster(hammer2_xop_t *arg, int clindex)
  * Backend for hammer2_readdir().
  */
 void
-hammer2_xop_readdir(hammer2_xop_t *arg, int clindex)
+hammer2_xop_readdir(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_readdir_t *xop = &arg->xop_readdir;
 	hammer2_chain_t *chain, *parent;
@@ -206,7 +206,7 @@ done:
  * Backend for hammer2_nresolve().
  */
 void
-hammer2_xop_nresolve(hammer2_xop_t *arg, int clindex)
+hammer2_xop_nresolve(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_nresolve_t *xop = &arg->xop_nresolve;
 	hammer2_chain_t *chain, *parent;
@@ -275,7 +275,7 @@ done:
  *	     is responsible for the final disposition of the actual inode.
  */
 void
-hammer2_xop_unlink(hammer2_xop_t *arg, int clindex)
+hammer2_xop_unlink(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_unlink_t *xop = &arg->xop_unlink;
 	hammer2_chain_t *parent, *chain;
@@ -439,7 +439,7 @@ done:
  *	 inode's nlinks, if present.
  */
 void
-hammer2_xop_nrename(hammer2_xop_t *arg, int clindex)
+hammer2_xop_nrename(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_nrename_t *xop = &arg->xop_nrename;
 	hammer2_pfs_t *pmp;
@@ -710,7 +710,7 @@ done:
  * Used by the inode create code to locate an unused lhc.
  */
 void
-hammer2_xop_scanlhc(hammer2_xop_t *arg, int clindex)
+hammer2_xop_scanlhc(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_scanlhc_t *xop = &arg->xop_scanlhc;
 	hammer2_chain_t *parent, *chain;
@@ -757,7 +757,7 @@ done:
  * Generic lookup of a specific key.
  */
 void
-hammer2_xop_lookup(hammer2_xop_t *arg, int clindex)
+hammer2_xop_lookup(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_lookup_t *xop = &arg->xop_lookup;
 	hammer2_chain_t *chain, *parent;
@@ -798,7 +798,7 @@ done:
 }
 
 void
-hammer2_xop_delete(hammer2_xop_t *arg, int clindex)
+hammer2_xop_delete(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_lookup_t *xop = &arg->xop_lookup;
 	hammer2_chain_t *parent, *chain;
@@ -849,7 +849,7 @@ done:
  *	    retained.
  */
 void
-hammer2_xop_scanall(hammer2_xop_t *arg, int clindex)
+hammer2_xop_scanall(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_scanall_t *xop = &arg->xop_scanall;
 	hammer2_chain_t *parent, *chain;
@@ -899,7 +899,7 @@ done:
  * Helper to create a directory entry.
  */
 void
-hammer2_xop_inode_mkdirent(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_mkdirent(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_mkdirent_t *xop = &arg->xop_mkdirent;
 	hammer2_chain_t *parent, *chain;
@@ -973,7 +973,7 @@ fail:
  * frontend.
  */
 void
-hammer2_xop_inode_create(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_create(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_create_t *xop = &arg->xop_create;
 	hammer2_chain_t *parent, *chain;
@@ -1028,7 +1028,7 @@ fail:
  * Create inode as above but leave it detached from the hierarchy.
  */
 void
-hammer2_xop_inode_create_det(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_create_det(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_create_t *xop = &arg->xop_create;
 	hammer2_chain_t *parent, *chain, *null_parent;
@@ -1093,7 +1093,7 @@ fail:
  * Take a detached chain and insert it into the topology.
  */
 void
-hammer2_xop_inode_create_ins(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_create_ins(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_create_t *xop = &arg->xop_create;
 	hammer2_chain_t *parent, *chain;
@@ -1149,7 +1149,7 @@ fail:
  * Inode delete helper (backend, threaded).
  */
 void
-hammer2_xop_inode_destroy(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_destroy(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_destroy_t *xop = &arg->xop_destroy;
 	hammer2_chain_t *parent, *chain;
@@ -1198,7 +1198,7 @@ done:
 }
 
 void
-hammer2_xop_inode_unlinkall(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_unlinkall(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_unlinkall_t *xop = &arg->xop_unlinkall;
 	hammer2_chain_t *parent, *chain;
@@ -1238,7 +1238,7 @@ done:
 }
 
 void
-hammer2_xop_inode_connect(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_connect(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_connect_t *xop = &arg->xop_connect;
 	hammer2_pfs_t *pmp;
@@ -1318,7 +1318,7 @@ fail:
  * manner inside the vfs_sync.
  */
 void
-hammer2_xop_inode_chain_sync(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_chain_sync(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_fsync_t *xop = &arg->xop_fsync;
 	hammer2_chain_t *parent, *chain = NULL;
@@ -1405,7 +1405,7 @@ done:
  * Backend for hammer2_bmap().
  */
 void
-hammer2_xop_bmap(hammer2_xop_t *arg, int clindex)
+hammer2_xop_bmap(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_bmap_t *xop = &arg->xop_bmap;
 	hammer2_inode_t *ip = xop->head.ip1;

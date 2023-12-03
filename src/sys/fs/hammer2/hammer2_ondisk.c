@@ -513,7 +513,7 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 {
 	hammer2_volume_data_t *vd;
 	hammer2_crc32_t crc0, crc1;
-	struct buf *bp = NULL;
+	struct buf *bp;
 	struct disklabel dl;
 	off_t blkoff, mediasize;
 	daddr_t blkno;
@@ -543,7 +543,6 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 		blkno = blkoff / DEV_BSIZE;
 		if (bread(devvp, blkno, HAMMER2_VOLUME_BYTES, &bp)) {
 			brelse(bp);
-			bp = NULL;
 			continue;
 		}
 
@@ -553,7 +552,6 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 		    (vd->magic != HAMMER2_VOLUME_ID_ABO)) {
 			hprintf("%s #%d: bad magic\n", path, i);
 			brelse(bp);
-			bp = NULL;
 			continue;
 		}
 		if (vd->magic == HAMMER2_VOLUME_ID_ABO) {
@@ -561,7 +559,6 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 			hprintf("%s #%d: reverse-endian filesystem detected\n",
 			    path, i);
 			brelse(bp);
-			bp = NULL;
 			continue;
 		}
 
@@ -574,7 +571,6 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 			    "%08x/%08x\n",
 			    path, i, crc0, crc1);
 			brelse(bp);
-			bp = NULL;
 			continue;
 		}
 		crc0 = vd->icrc_sects[HAMMER2_VOL_ICRC_SECT1];
@@ -585,7 +581,6 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 			    "%08x/%08x\n",
 			    path, i, crc0, crc1);
 			brelse(bp);
-			bp = NULL;
 			continue;
 		}
 		crc0 = vd->icrc_volheader;
@@ -596,7 +591,6 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 			    "%08x/%08x\n",
 			    path, i, crc0, crc1);
 			brelse(bp);
-			bp = NULL;
 			continue;
 		}
 
@@ -605,7 +599,6 @@ hammer2_read_volume_header(struct vnode *devvp, const char *path,
 			zone = i;
 		}
 		brelse(bp);
-		bp = NULL;
 	}
 
 	if (zone == -1) {

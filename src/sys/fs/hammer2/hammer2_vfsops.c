@@ -65,6 +65,7 @@ static hammer2_pfslist_t hammer2_spmplist;
 
 hammer2_lk_t hammer2_mntlk;
 
+/* sysctl */
 static int hammer2_supported_version = HAMMER2_VOL_VERSION_DEFAULT;
 int hammer2_inode_allocs;
 int hammer2_chain_allocs;
@@ -72,6 +73,9 @@ int hammer2_dio_allocs;
 int hammer2_dio_limit = 256;
 int hammer2_limit_scan_depth;
 int hammer2_limit_saved_chains;
+int hammer2_always_compress;
+
+/* not sysctl */
 long hammer2_count_modified_chains;
 
 static const struct sysctl_bounded_args hammer2_vars[] = {
@@ -82,6 +86,7 @@ static const struct sysctl_bounded_args hammer2_vars[] = {
 	{ HAMMER2CTL_DIO_LIMIT, &hammer2_dio_limit, 0, INT_MAX, },
 	{ HAMMER2CTL_LIMIT_SCAN_DEPTH, &hammer2_limit_scan_depth, 0, INT_MAX, },
 	{ HAMMER2CTL_LIMIT_SAVED_CHAINS, &hammer2_limit_saved_chains, 0, INT_MAX, },
+	{ HAMMER2CTL_ALWAYS_COMPRESS, &hammer2_always_compress, 0, INT_MAX, },
 };
 
 static unsigned long
@@ -138,9 +143,8 @@ hammer2_init(struct vfsconf *vfsp)
 		hammer2_dio_limit = 100000;
 
 	/*
-	 * XXX A pool for read buffer with size of 65536 is usable,
-	 * but subsequent pool_get(&hammer2_xops_pool, PR_WAITOK | ...)
-	 * gets blocked and never returns.
+	 * Note that buffers for strategy read/write use malloc(9) as
+	 * subsequent pool_get() gets blocked and never returns.
 	 */
 	pool_init(&hammer2_inode_pool, sizeof(hammer2_inode_t), 0,
 	    IPL_NONE, PR_WAITOK, "h2inopool", NULL);
@@ -583,8 +587,8 @@ hammer2_mount(struct mount *mp, const char *path, void *data,
 	label = strchr(devstr, '@');
 	if (label == NULL || label[1] == 0) {
 		/*
-		 * DragonFly uses either "BOOT", "ROOT" or "DATA" based
-		 * on label[-1].  In OpenBSD, simply use "DATA" by default.
+		 * DragonFly HAMMER2 uses either "BOOT", "ROOT" or "DATA"
+		 * based on label[-1].
 		 */
 		label = __DECONST(char *, "DATA");
 	} else {
@@ -1276,7 +1280,7 @@ again:
 	hammer2_mtx_ex(&hmp->iotree_lock);
 	hammer2_io_cleanup(hmp, &hmp->iotree);
 	if (hmp->iofree_count) {
-		hprintf("%d I/O's left hanging\n", hmp->iofree_count);
+		hprintf("XXX %d I/O's left hanging\n", hmp->iofree_count);
 		//KKASSERT(0); /* XXX2 enable this */
 	}
 	hammer2_mtx_unlock(&hmp->iotree_lock);
@@ -1594,7 +1598,7 @@ hammer2_vfs_sync_pmp(hammer2_pfs_t *pmp, int waitfor __unused)
 	hammer2_depend_t *depend, *depend_next;
 	struct vnode *vp;
 	uint32_t pass2;
-	int error, dorestart;
+	int error, dorestart, ndrop;
 
 	/*
 	 * Move all inodes on sideq to syncq.  This will clear sideq.
@@ -1719,8 +1723,7 @@ restart:
 		 */
 		vp = ip->vp; /* NULL after vflush() */
 		if (vp) {
-			vref(vp);
-			if (vn_lock(vp, LK_EXCLUSIVE | LK_NOWAIT)) {
+			if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT)) {
 				/*
 				 * Failed to get the vnode, requeue the inode
 				 * (PASS2 is already set so it will be found
@@ -1730,7 +1733,6 @@ restart:
 				 * later.  We sleep if PASS2 was *previously*
 				 * set, before we set it again above.
 				 */
-				vrele(vp);
 				vp = NULL;
 				dorestart = 1;
 				debug_hprintf("inum %016jx vn_lock failed\n",
@@ -1823,8 +1825,9 @@ restart:
 			} else {
 				hammer2_inode_delayed_sideq(ip);
 			}
+			ndrop = ip->vhold;
 			vput(vp);
-			hammer2_inode_vdrop_all(ip);
+			hammer2_inode_vdrop(ip, ndrop);
 			/* OpenBSD mknod specific, not a must to begin with. */
 			/*
 			if (vp->v_type == VFIFO) {

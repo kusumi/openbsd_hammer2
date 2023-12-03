@@ -309,18 +309,37 @@ hammer2_io_putblk(hammer2_io_t **diop)
 	dio->bp = NULL;
 
 	/* Write out and dispose of buffer. */
-	if (bp) {
-		if (orefs & HAMMER2_DIO_GOOD) {
-			if (orefs & HAMMER2_DIO_DIRTY) {
+	if ((orefs & HAMMER2_DIO_GOOD) && bp) {
+		/* Non-errored disposal of buffer. */
+		if (orefs & HAMMER2_DIO_DIRTY) {
+			/*
+			 * Allows dirty buffers to accumulate and
+			 * possibly be canceled (e.g. by a 'rm'),
+			 * by default we will burst-write later.
+			 *
+			 * We generally do NOT want to issue an actual
+			 * b[a]write() or cluster_write() here.  Due to
+			 * the way chains are locked, buffers may be cycled
+			 * in and out quite often and disposal here can cause
+			 * multiple writes or write-read stalls.
+			 *
+			 * If FLUSH is set we do want to issue the actual
+			 * write.  This typically occurs in the write-behind
+			 * case when writing to large files.
+			 */
+			/* No cluster_write() in OpenBSD. */
+			if (dio->refs & HAMMER2_DIO_FLUSH)
+				bawrite(bp);
+			else
 				bdwrite(bp);
-				hammer2_inc_iostat(&hmp->iostat_write,
-				    dio->btype, dio->psize);
-			} else {
-				brelse(bp);
-			}
+			hammer2_inc_iostat(&hmp->iostat_write, dio->btype,
+			    dio->psize);
 		} else {
-			brelse(bp);
+			bqrelse(bp);
 		}
+	} else if (bp) {
+		/* Errored disposal of buffer. */
+		brelse(bp);
 	}
 
 	/* Update iofree_count before disposing of the dio. */
@@ -449,10 +468,39 @@ hammer2_io_bread(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
 	return ((*diop)->error);
 }
 
+hammer2_io_t *
+hammer2_io_getquick(hammer2_dev_t *hmp, off_t lbase, int lsize)
+{
+	return (hammer2_io_getblk(hmp, 0, lbase, lsize, HAMMER2_DOP_READQ));
+}
+
+void
+hammer2_io_bawrite(hammer2_io_t **diop)
+{
+	atomic_set_32(&(*diop)->refs, HAMMER2_DIO_DIRTY | HAMMER2_DIO_FLUSH);
+	hammer2_io_putblk(diop);
+}
+
+void
+hammer2_io_bdwrite(hammer2_io_t **diop)
+{
+	atomic_set_32(&(*diop)->refs, HAMMER2_DIO_DIRTY);
+	hammer2_io_putblk(diop);
+}
+
+int
+hammer2_io_bwrite(hammer2_io_t **diop)
+{
+	atomic_set_32(&(*diop)->refs, HAMMER2_DIO_DIRTY | HAMMER2_DIO_FLUSH);
+	hammer2_io_putblk(diop);
+
+	return (0); /* XXX */
+}
+
 void
 hammer2_io_setdirty(hammer2_io_t *dio)
 {
-	atomic_set_int(&dio->refs, HAMMER2_DIO_DIRTY);
+	atomic_set_32(&dio->refs, HAMMER2_DIO_DIRTY);
 }
 
 void

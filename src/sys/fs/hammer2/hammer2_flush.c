@@ -1094,7 +1094,7 @@ done:
  * Primarily called from vfs_sync().
  */
 void
-hammer2_xop_inode_flush(hammer2_xop_t *arg, int clindex)
+hammer2_xop_inode_flush(hammer2_xop_t *arg, void *scratch, int clindex)
 {
 	hammer2_xop_flush_t *xop = &arg->xop_flush;
 	hammer2_dev_t *hmp;

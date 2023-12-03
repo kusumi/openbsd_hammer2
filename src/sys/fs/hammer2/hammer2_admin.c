@@ -62,6 +62,7 @@ H2XOPDESCRIPTOR(inode_unlinkall);
 H2XOPDESCRIPTOR(inode_connect);
 H2XOPDESCRIPTOR(inode_flush);
 H2XOPDESCRIPTOR(strategy_read);
+H2XOPDESCRIPTOR(strategy_write);
 H2XOPDESCRIPTOR(bmap);
 
 /*
@@ -288,21 +289,22 @@ hammer2_xop_unset_ipdep(hammer2_inode_t *ip)
 #ifdef INVARIANTS
 //#define XOP_ADMIN_DEBUG
 static __inline void
-xop_storage_func(hammer2_xop_head_t *xop, hammer2_inode_t *ip, int i)
+xop_storage_func(hammer2_xop_head_t *xop, hammer2_inode_t *ip, void *scratch,
+    int i)
 {
 #ifdef XOP_ADMIN_DEBUG
 	hprintf("xop_%s inum %016jx index %d\n",
 	    xop->desc->id, (intmax_t)ip->meta.inum, i);
 #endif
-	xop->desc->storage_func((hammer2_xop_t *)xop, i);
+	xop->desc->storage_func((hammer2_xop_t *)xop, scratch, i);
 #ifdef XOP_ADMIN_DEBUG
 	hprintf("xop_%s inum %016jx index %d done\n",
 	    xop->desc->id, (intmax_t)ip->meta.inum, i);
 #endif
 }
 #else
-#define xop_storage_func(xop, ip, i)	\
-	xop->desc->storage_func((hammer2_xop_t *)xop, i)
+#define xop_storage_func(xop, ip, scratch, i)	\
+	xop->desc->storage_func((hammer2_xop_t *)xop, scratch, i)
 #endif
 
 /*
@@ -319,6 +321,10 @@ hammer2_xop_start(hammer2_xop_head_t *xop, hammer2_xop_desc_t *desc)
 	KKASSERT(ip);
 	hammer2_assert_cluster(&ip->cluster);
 	xop->desc = desc;
+
+	if (desc == &hammer2_strategy_write_desc)
+		xop->scratch = malloc(hammer2_get_logical(), M_HAMMER2,
+		    M_WAITOK | M_ZERO);
 
 	for (i = 0; i < ip->cluster.nchains; ++i) {
 		mask = 1LLU << i;
@@ -337,7 +343,7 @@ hammer2_xop_start(hammer2_xop_head_t *xop, hammer2_xop_desc_t *desc)
 				hammer2_xop_testset_ipdep(xop->ip3);
 			if (xop->ip4 && xop->ip4 != xop->ip2) /* rename */
 				hammer2_xop_testset_ipdep(xop->ip4);
-			xop_storage_func(xop, ip, i);
+			xop_storage_func(xop, ip, xop->scratch, i);
 			hammer2_xop_retire(xop, mask);
 		} else {
 			hammer2_xop_feed(xop, NULL, i, ECONNABORTED);
@@ -435,6 +441,9 @@ hammer2_xop_retire(hammer2_xop_head_t *xop, uint32_t mask)
 		free(fifo->array, M_HAMMER2, 0);
 		free(fifo->errors, M_HAMMER2, 0);
 	}
+
+	if (xop->scratch)
+		free(xop->scratch, M_HAMMER2, 0);
 
 	pool_put(&hammer2_xops_pool, xop);
 }

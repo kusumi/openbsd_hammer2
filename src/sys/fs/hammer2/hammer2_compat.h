@@ -110,12 +110,14 @@ atomic_fetchadd_64(volatile uint64_t *p, uint64_t v)
 	return (value);
 }
 
-#define cpu_pause	CPU_BUSY_CYCLE
+#define cpu_pause()	CPU_BUSY_CYCLE()
 
 /* Taken from sys/sys/cdefs.h in FreeBSD. */
 #define __compiler_membar()	__asm __volatile(" " : : : "memory")
-#define cpu_ccfence	__compiler_membar
+#define cpu_ccfence()	__compiler_membar()
 
 #define getticks()	(ticks)
+
+#define bqrelse(bp)	brelse(bp)
 
 #endif /* !_FS_HAMMER2_COMPAT_H_ */

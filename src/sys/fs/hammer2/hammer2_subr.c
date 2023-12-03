@@ -272,6 +272,32 @@ hammer2_get_logical(void)
 	return (hammer2_calc_logical(NULL, 0, NULL, NULL));
 }
 
+/*
+ * Calculate the physical block size.  pblksize <= lblksize.  Primarily
+ * used to calculate a smaller physical block for the logical block
+ * containing the file EOF.
+ *
+ * Returns 0 if the requested base offset is beyond the file EOF.
+ */
+int
+hammer2_calc_physical(hammer2_inode_t *ip, hammer2_key_t lbase)
+{
+	int lblksize, pblksize, eofbytes;
+
+	lblksize = hammer2_calc_logical(ip, lbase, NULL, NULL);
+	if (lbase + lblksize <= ip->meta.size)
+		return (lblksize);
+	if (lbase >= ip->meta.size)
+		return (0);
+	eofbytes = (int)(ip->meta.size - lbase);
+	pblksize = lblksize;
+	while (pblksize >= eofbytes && pblksize >= HAMMER2_ALLOC_MIN)
+		pblksize >>= 1;
+	pblksize <<= 1;
+
+	return (pblksize);
+}
+
 void
 hammer2_update_time(uint64_t *timep)
 {
