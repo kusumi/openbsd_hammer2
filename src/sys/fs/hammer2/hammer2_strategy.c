@@ -52,6 +52,8 @@ static int hammer2_strategy_read(struct vop_strategy_args *);
 static int hammer2_strategy_write(struct vop_strategy_args *);
 static void hammer2_strategy_read_completion(hammer2_chain_t *, const char *,
     struct buf *);
+static void hammer2_dedup_record(hammer2_chain_t *, hammer2_io_t *,
+    const char *);
 static hammer2_off_t hammer2_dedup_lookup(hammer2_dev_t *, char **, int);
 
 int
@@ -103,7 +105,7 @@ hammer2_decompress_LZ4_callback(const char *data, unsigned int bytes,
 	compressed_size = *(const int *)data;
 	KKASSERT((uint32_t)compressed_size <= bytes - sizeof(int));
 
-	compressed_buffer = malloc(HAMMER2_PBUFSIZE, M_HAMMER2_RBUF,
+	compressed_buffer = hmalloc(HAMMER2_PBUFSIZE, M_HAMMER2_RBUF,
 	    M_WAITOK | M_ZERO);
 	result = LZ4_decompress_safe(__DECONST(char *, &data[sizeof(int)]),
 	    compressed_buffer, compressed_size, bp->b_bufsize);
@@ -118,7 +120,7 @@ hammer2_decompress_LZ4_callback(const char *data, unsigned int bytes,
 	bcopy(compressed_buffer, bp->b_data, bp->b_bufsize);
 	if (result < bp->b_bufsize)
 		bzero(bp->b_data + result, bp->b_bufsize - result);
-	free(compressed_buffer, M_HAMMER2_RBUF, 0);
+	hfree(compressed_buffer, M_HAMMER2_RBUF, HAMMER2_PBUFSIZE);
 	bp->b_resid = 0;
 }
 
@@ -141,7 +143,7 @@ hammer2_decompress_ZLIB_callback(const char *data, unsigned int bytes,
 	if (result != Z_OK)
 		hprintf("fatal error in inflateInit\n");
 
-	compressed_buffer = malloc(HAMMER2_PBUFSIZE, M_HAMMER2_RBUF,
+	compressed_buffer = hmalloc(HAMMER2_PBUFSIZE, M_HAMMER2_RBUF,
 	    M_WAITOK | M_ZERO);
 	strm_decompress.next_in = __DECONST(char *, data);
 
@@ -159,7 +161,7 @@ hammer2_decompress_ZLIB_callback(const char *data, unsigned int bytes,
 	result = bp->b_bufsize - strm_decompress.avail_out;
 	if (result < bp->b_bufsize)
 		bzero(bp->b_data + result, strm_decompress.avail_out);
-	free(compressed_buffer, M_HAMMER2_RBUF, 0);
+	hfree(compressed_buffer, M_HAMMER2_RBUF, HAMMER2_PBUFSIZE);
 	inflateEnd(&strm_decompress);
 
 	bp->b_resid = 0;
@@ -274,9 +276,7 @@ hammer2_strategy_read_completion(hammer2_chain_t *focus, const char *data,
 		 * Data is on-media, record for live dedup.  Release the
 		 * chain (try to free it) when done.  The data is still
 		 * cached by both the buffer cache in front and the
-		 * block device behind us.  This leaves more room in the
-		 * LRU chain cache for meta-data chains which we really
-		 * want to retain.
+		 * block device behind us.
 		 *
 		 * NOTE: Deduplication cannot be safely recorded for
 		 *	 records without a check code.
@@ -644,7 +644,7 @@ hammer2_compress_and_write(char *data, hammer2_inode_t *ip,
 			 *	 overrun the buffer if given a 4-byte
 			 *	 granularity.
 			 */
-			comp_buffer = malloc(HAMMER2_PBUFSIZE / 2, M_HAMMER2_WBUF,
+			comp_buffer = hmalloc(HAMMER2_PBUFSIZE / 2, M_HAMMER2_WBUF,
 			    M_WAITOK | M_ZERO);
 			comp_size = LZ4_compress_limitedOutput(data,
 			    &comp_buffer[sizeof(int)], pblksize,
@@ -665,7 +665,7 @@ hammer2_compress_and_write(char *data, hammer2_inode_t *ip,
 			if (ret != Z_OK)
 				hprintf("fatal error on deflateInit\n");
 
-			comp_buffer = malloc(HAMMER2_PBUFSIZE / 2, M_HAMMER2_WBUF,
+			comp_buffer = hmalloc(HAMMER2_PBUFSIZE / 2, M_HAMMER2_WBUF,
 			    M_WAITOK | M_ZERO);
 			strm_compress.next_in = data;
 			strm_compress.avail_in = pblksize;
@@ -815,7 +815,7 @@ done:
 		hammer2_chain_drop(chain);
 	}
 	if (comp_buffer)
-		free(comp_buffer, M_HAMMER2_WBUF, 0);
+		hfree(comp_buffer, M_HAMMER2_WBUF, HAMMER2_PBUFSIZE / 2);
 }
 
 /*
@@ -998,7 +998,7 @@ hammer2_write_bp(hammer2_chain_t *chain, char *data, int ioflag, int pblksize,
  *	    chains (so NOT strategy writes which can undergo further
  *	    modification after the fact!).
  */
-void
+static void
 hammer2_dedup_record(hammer2_chain_t *chain, hammer2_io_t *dio,
     const char *data)
 {
@@ -1013,15 +1013,14 @@ hammer2_dedup_record(hammer2_chain_t *chain, hammer2_io_t *dio,
 	 * remain marked MODIFIED (which might have benefits in special
 	 * situations, though typically it does not).
 	 */
-	if (1 /* || hammer2_dedup_enable == 0 */)
+	if (hammer2_dedup_enable == 0)
 		return;
-	KKASSERT(0);
-
 	if (dio == NULL) {
 		dio = chain->dio;
 		if (dio == NULL)
 			return;
 	}
+	hammer2_mtx_assert_unlocked(&dio->lock);
 
 	switch (HAMMER2_DEC_CHECK(chain->bref.methods)) {
 	case HAMMER2_CHECK_ISCSI32:
@@ -1083,7 +1082,9 @@ hammer2_dedup_record(hammer2_chain_t *chain, hammer2_io_t *dio,
 	 * be set before a bcmp/dedup operation is able to use the block.
 	 */
 	mask = hammer2_dedup_mask(dio, chain->bref.data_off, chain->bytes);
-	dio->dedup_valid |= mask;
+	hammer2_mtx_ex(&dio->lock);
+	dio->dedup_valid |= mask; /* DragonFly uses atomic_set_64 */
+	hammer2_mtx_unlock(&dio->lock);
 }
 
 static hammer2_off_t
@@ -1096,10 +1097,8 @@ hammer2_dedup_lookup(hammer2_dev_t *hmp, char **datap, int pblksize)
 	uint64_t crc, mask;
 	int i;
 
-	if (1 /* || hammer2_dedup_enable == 0 */)
+	if (hammer2_dedup_enable == 0)
 		return (0);
-	KKASSERT(0);
-
 	data = *datap;
 	if (data == NULL)
 		return (0);
@@ -1123,14 +1122,18 @@ hammer2_dedup_lookup(hammer2_dev_t *hmp, char **datap, int pblksize)
 		if (dio) {
 			dtmp = hammer2_io_data(dio, off),
 			mask = hammer2_dedup_mask(dio, off, pblksize);
+			hammer2_mtx_assert_unlocked(&dio->lock);
+			hammer2_mtx_ex(&dio->lock);
 			if ((dio->dedup_alloc & mask) == mask &&
 			    (dio->dedup_valid & mask) == mask &&
 			    bcmp(data, dtmp, pblksize) == 0) {
+				hammer2_mtx_unlock(&dio->lock);
 				hammer2_io_putblk(&dio);
 				*datap = NULL;
 				dedup[i].ticks = getticks();
 				return (off);
 			}
+			hammer2_mtx_unlock(&dio->lock);
 			hammer2_io_putblk(&dio);
 		}
 	}

@@ -42,6 +42,12 @@
 #include <sys/systm.h>
 #include <sys/proc.h>
 #include <sys/rwlock.h>
+#include <sys/malloc.h>
+#include <sys/pool.h>
+#include <sys/vnode.h>
+#include <sys/atomic.h>
+
+#include "hammer2_compat.h"
 
 #ifdef INVARIANTS
 #define HFMT	"%s(%s|%d): "
@@ -60,10 +66,10 @@
 #if 0
 #define debug_hprintf	hprintf
 #else
-#define debug_hprintf(X, ...)	do { } while (0)
+#define debug_hprintf(X, ...)	do {} while (0)
 #endif
 #else
-#define debug_hprintf(X, ...)	do { } while (0)
+#define debug_hprintf(X, ...)	do {} while (0)
 #endif
 
 /* hammer2_lk is lockmgr(9) in DragonFly. */
@@ -186,5 +192,122 @@ typedef struct rwlock hammer2_spin_t;
 #define hammer2_spin_assert_sh(p)	rw_assert_rdlock(p)
 #define hammer2_spin_assert_locked(p)	rw_assert_anylock(p)
 #define hammer2_spin_assert_unlocked(p)	rw_assert_unlocked(p)
+
+extern struct pool hammer2_pool_inode;
+extern struct pool hammer2_pool_xops;
+
+extern int malloc_leak_m_hammer2;
+extern int malloc_leak_m_hammer2_rbuf;
+extern int malloc_leak_m_hammer2_wbuf;
+extern int malloc_leak_m_hammer2_lz4;
+extern int malloc_leak_m_temp;
+
+//#define HAMMER2_MALLOC
+#ifdef HAMMER2_MALLOC
+static __inline void
+adjust_malloc_leak(int delta, int type)
+{
+	int *lp;
+
+	switch (type) {
+	case M_HAMMER2:
+		lp = &malloc_leak_m_hammer2;
+		break;
+	case M_HAMMER2_RBUF:
+		lp = &malloc_leak_m_hammer2_rbuf;
+		break;
+	case M_HAMMER2_WBUF:
+		lp = &malloc_leak_m_hammer2_wbuf;
+		break;
+	case M_HAMMER2_LZ4:
+		lp = &malloc_leak_m_hammer2_lz4;
+		break;
+	case M_TEMP:
+		lp = &malloc_leak_m_temp;
+		break;
+	default:
+		hpanic("bad malloc type %d", type);
+		break;
+	}
+	atomic_add_int(lp, delta);
+}
+
+static __inline void *
+hmalloc(size_t size, int type, int flags)
+{
+	void *addr;
+
+	flags &= ~M_WAITOK;
+	flags |= M_NOWAIT;
+
+	addr = malloc(size, type, flags);
+	KASSERTMSG(addr, "size %ld type %d flags %x malloc_leak %d,%d,%d,%d,%d",
+	    (long)size, type, flags,
+	    malloc_leak_m_hammer2,
+	    malloc_leak_m_hammer2_rbuf,
+	    malloc_leak_m_hammer2_wbuf,
+	    malloc_leak_m_hammer2_lz4,
+	    malloc_leak_m_temp);
+	if (addr) {
+		KKASSERT(size > 0);
+		adjust_malloc_leak(size, type);
+	}
+
+	return (addr);
+}
+
+static __inline void
+hfree(void *addr, int type, size_t freedsize)
+{
+	if (addr) {
+		KKASSERT(freedsize > 0);
+		adjust_malloc_leak(-(int)freedsize, type);
+	}
+	free(addr, type, freedsize);
+}
+
+static __inline char *
+hstrdup(const char *str)
+{
+	size_t len;
+	char *copy;
+
+	len = strlen(str) + 1;
+	copy = hmalloc(len, M_TEMP, M_NOWAIT);
+	if (copy == NULL)
+		return (NULL);
+	bcopy(str, copy, len);
+
+	return (copy);
+}
+#else
+#define hmalloc(size, type, flags)	malloc(size, type, flags)
+#define hfree(addr, type, freedsize)	free(addr, type, freedsize)
+
+static __inline char *
+hstrdup(const char *str)
+{
+	size_t len;
+	char *copy;
+
+	len = strlen(str) + 1;
+	copy = hmalloc(len, M_TEMP, M_WAITOK);
+	bcopy(str, copy, len);
+
+	return (copy);
+}
+#endif
+
+static __inline void
+hstrfree(char *str)
+{
+	hfree(str, M_TEMP, strlen(str) + 1);
+}
+
+extern const struct vops hammer2_vops;
+extern const struct vops hammer2_specvops;
+#ifdef FIFO
+extern const struct vops hammer2_fifovops;
+#endif
 
 #endif /* !_FS_HAMMER2_OS_H_ */

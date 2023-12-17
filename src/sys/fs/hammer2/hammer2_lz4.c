@@ -340,7 +340,7 @@ void*
 LZ4_create(void)
 {
 #ifdef _KERNEL
-	return malloc(HASHTABLESIZE, M_HAMMER2_LZ4, M_WAITOK);
+	return hmalloc(HASHTABLESIZE, M_HAMMER2_LZ4, M_WAITOK);
 #else
 	return malloc(HASHTABLESIZE);
 #endif
@@ -350,7 +350,7 @@ int
 LZ4_free(void* ctx)
 {
 #ifdef _KERNEL
-	free(ctx, M_HAMMER2_LZ4, 0);
+	hfree(ctx, M_HAMMER2_LZ4, HASHTABLESIZE);
 #else
 	free(ctx);
 #endif

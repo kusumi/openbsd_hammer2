@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
- * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
+ * Copyright (c) 2011-2023 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
  * by Matthew Dillon <dillon@backplane.com>
@@ -51,8 +51,8 @@ static void hammer2_mount_helper(struct mount *, hammer2_pfs_t *);
 static void hammer2_unmount_helper(struct mount *, hammer2_pfs_t *,
     hammer2_dev_t *);
 
-struct pool hammer2_inode_pool;
-struct pool hammer2_xops_pool;
+struct pool hammer2_pool_inode;
+struct pool hammer2_pool_xops;
 
 /* global list of HAMMER2 */
 TAILQ_HEAD(hammer2_mntlist, hammer2_dev); /* <-> hammer2_dev::mntentry */
@@ -67,23 +67,33 @@ hammer2_lk_t hammer2_mntlk;
 
 /* sysctl */
 static int hammer2_supported_version = HAMMER2_VOL_VERSION_DEFAULT;
-int hammer2_inode_allocs;
-int hammer2_chain_allocs;
-int hammer2_dio_allocs;
+int hammer2_dedup_enable = 1;
+int hammer2_count_inode_allocated;
+int hammer2_count_chain_allocated;
+int hammer2_count_chain_modified;
+int hammer2_count_dio_allocated;
 int hammer2_dio_limit = 256;
+int hammer2_bulkfree_tps = 5000;
 int hammer2_limit_scan_depth;
 int hammer2_limit_saved_chains;
 int hammer2_always_compress;
 
 /* not sysctl */
-long hammer2_count_modified_chains;
+int malloc_leak_m_hammer2;
+int malloc_leak_m_hammer2_rbuf;
+int malloc_leak_m_hammer2_wbuf;
+int malloc_leak_m_hammer2_lz4;
+int malloc_leak_m_temp;
 
 static const struct sysctl_bounded_args hammer2_vars[] = {
 	{ HAMMER2CTL_SUPPORTED_VERSION, &hammer2_supported_version, SYSCTL_INT_READONLY, },
-	{ HAMMER2CTL_INODE_ALLOCS, &hammer2_inode_allocs, SYSCTL_INT_READONLY, },
-	{ HAMMER2CTL_CHAIN_ALLOCS, &hammer2_chain_allocs, SYSCTL_INT_READONLY, },
-	{ HAMMER2CTL_DIO_ALLOCS, &hammer2_dio_allocs, SYSCTL_INT_READONLY, },
+	{ HAMMER2CTL_DEDUP_ENABLE, &hammer2_dedup_enable, 0, INT_MAX, },
+	{ HAMMER2CTL_INODE_ALLOCATED, &hammer2_count_inode_allocated, SYSCTL_INT_READONLY, },
+	{ HAMMER2CTL_CHAIN_ALLOCATED, &hammer2_count_chain_allocated, SYSCTL_INT_READONLY, },
+	{ HAMMER2CTL_CHAIN_MODIFIED, &hammer2_count_chain_modified, SYSCTL_INT_READONLY, },
+	{ HAMMER2CTL_DIO_ALLOCATED, &hammer2_count_dio_allocated, SYSCTL_INT_READONLY, },
 	{ HAMMER2CTL_DIO_LIMIT, &hammer2_dio_limit, 0, INT_MAX, },
+	{ HAMMER2CTL_BULKFREE_TPS, &hammer2_bulkfree_tps, 0, INT_MAX, },
 	{ HAMMER2CTL_LIMIT_SCAN_DEPTH, &hammer2_limit_scan_depth, 0, INT_MAX, },
 	{ HAMMER2CTL_LIMIT_SAVED_CHAINS, &hammer2_limit_saved_chains, 0, INT_MAX, },
 	{ HAMMER2CTL_ALWAYS_COMPRESS, &hammer2_always_compress, 0, INT_MAX, },
@@ -100,23 +110,30 @@ hammer2_assert_clean(void)
 {
 	int error = 0;
 
-	if (hammer2_inode_allocs > 0) {
-		hprintf("%d inode left\n", hammer2_inode_allocs);
+	if (hammer2_count_inode_allocated > 0) {
+		hprintf("%d inode left\n", hammer2_count_inode_allocated);
 		error = EINVAL;
 	}
-	KKASSERT(hammer2_inode_allocs == 0);
+	KKASSERT(hammer2_count_inode_allocated == 0);
 
-	if (hammer2_chain_allocs > 0) {
-		hprintf("%d chain left\n", hammer2_chain_allocs);
+	if (hammer2_count_chain_allocated > 0) {
+		hprintf("%d chain left\n", hammer2_count_chain_allocated);
 		error = EINVAL;
 	}
-	KKASSERT(hammer2_chain_allocs == 0);
+	KKASSERT(hammer2_count_chain_allocated == 0);
 
-	if (hammer2_dio_allocs > 0) {
-		hprintf("%d dio left\n", hammer2_dio_allocs);
+	if (hammer2_count_chain_modified > 0) {
+		hprintf("%d modified chain left\n",
+		    hammer2_count_chain_modified);
 		error = EINVAL;
 	}
-	KKASSERT(hammer2_dio_allocs == 0);
+	KKASSERT(hammer2_count_chain_modified == 0);
+
+	if (hammer2_count_dio_allocated > 0) {
+		hprintf("%d dio left\n", hammer2_count_dio_allocated);
+		error = EINVAL;
+	}
+	KKASSERT(hammer2_count_dio_allocated == 0);
 
 	return (error);
 }
@@ -131,7 +148,6 @@ static int
 hammer2_init(struct vfsconf *vfsp)
 {
 	long hammer2_limit_dirty_chains; /* originally sysctl */
-	long hammer2_limit_dirty_inodes; /* originally sysctl */
 
 	KASSERT(sizeof(struct hammer2_mount_info) == sizeof(struct hammer2_args));
 	KASSERT(sizeof(struct hammer2_mount_info) <= 160); /* union mount_info */
@@ -146,10 +162,10 @@ hammer2_init(struct vfsconf *vfsp)
 	 * Note that buffers for strategy read/write use malloc(9) as
 	 * subsequent pool_get() gets blocked and never returns.
 	 */
-	pool_init(&hammer2_inode_pool, sizeof(hammer2_inode_t), 0,
+	pool_init(&hammer2_pool_inode, sizeof(hammer2_inode_t), 0,
 	    IPL_NONE, PR_WAITOK, "h2inopool", NULL);
 
-	pool_init(&hammer2_xops_pool, sizeof(hammer2_xop_t), 0,
+	pool_init(&hammer2_pool_xops, sizeof(hammer2_xop_t), 0,
 	    IPL_NONE, PR_WAITOK, "h2xopspool", NULL);
 
 	hammer2_lk_init(&hammer2_mntlk, "h2mntlk");
@@ -164,13 +180,6 @@ hammer2_init(struct vfsconf *vfsp)
 		hammer2_limit_dirty_chains = HAMMER2_LIMIT_DIRTY_CHAINS;
 	if (hammer2_limit_dirty_chains < 1000)
 		hammer2_limit_dirty_chains = 1000;
-
-	hammer2_limit_dirty_inodes = desiredvnodes / 25;
-	if (hammer2_limit_dirty_inodes < 100)
-		hammer2_limit_dirty_inodes = 100;
-	if (hammer2_limit_dirty_inodes > HAMMER2_LIMIT_DIRTY_INODES)
-		hammer2_limit_dirty_inodes = HAMMER2_LIMIT_DIRTY_INODES;
-
 	hammer2_limit_saved_chains = hammer2_limit_dirty_chains * 5;
 
 	return (0);
@@ -211,11 +220,10 @@ hammer2_pfsalloc(hammer2_chain_t *chain, const hammer2_inode_data_t *ripdata,
 	}
 
 	if (pmp == NULL) {
-		pmp = malloc(sizeof(*pmp), M_HAMMER2, M_WAITOK | M_ZERO);
+		pmp = hmalloc(sizeof(*pmp), M_HAMMER2, M_WAITOK | M_ZERO);
 		pmp->force_local = force_local;
 		hammer2_trans_manage_init(pmp);
-		hammer2_spin_init(&pmp->inum_spin, "h2pmp_inosp");
-		hammer2_spin_init(&pmp->lru_spin, "h2pmp_lrusp");
+		hammer2_spin_init(&pmp->blockset_spin, "h2pmp_bssp");
 		hammer2_spin_init(&pmp->list_spin, "h2pmp_lssp");
 		for (i = 0; i < HAMMER2_IHASH_SIZE; i++) {
 			hammer2_lk_init(&pmp->xop_lock[i], "h2pmp_xoplk");
@@ -223,10 +231,9 @@ hammer2_pfsalloc(hammer2_chain_t *chain, const hammer2_inode_data_t *ripdata,
 		}
 		hammer2_lk_init(&pmp->trans_lock, "h2pmp_trlk");
 		hammer2_lkc_init(&pmp->trans_cv, "h2pmp_trlkc");
-		RB_INIT(&pmp->inum_tree);
 		TAILQ_INIT(&pmp->syncq);
 		TAILQ_INIT(&pmp->depq);
-		TAILQ_INIT(&pmp->lru_list);
+		hammer2_inum_hash_init(pmp);
 
 		KKASSERT((HAMMER2_IHASH_SIZE & (HAMMER2_IHASH_SIZE - 1)) == 0);
 		pmp->ipdep_lists = hashinit(HAMMER2_IHASH_SIZE, M_HAMMER2,
@@ -282,11 +289,11 @@ hammer2_pfsalloc(hammer2_chain_t *chain, const hammer2_inode_data_t *ripdata,
 			pmp->pfs_types[j] = HAMMER2_PFSTYPE_MASTER;
 		else
 			pmp->pfs_types[j] = ripdata->meta.pfs_type;
-		pmp->pfs_names[j] = kstrdup((const char *)ripdata->filename);
+		pmp->pfs_names[j] = hstrdup((const char *)ripdata->filename);
 		pmp->pfs_hmps[j] = chain->hmp;
-		hammer2_spin_ex(&pmp->inum_spin);
+		hammer2_spin_ex(&pmp->blockset_spin);
 		pmp->pfs_iroot_blocksets[j] = chain->data->ipdata.u.blockset;
-		hammer2_spin_unex(&pmp->inum_spin);
+		hammer2_spin_unex(&pmp->blockset_spin);
 
 		/*
 		 * If the PFS is already mounted we must account
@@ -357,21 +364,6 @@ hammer2_pfsfree(hammer2_pfs_t *pmp)
 	else
 		TAILQ_REMOVE(&hammer2_pfslist, pmp, mntentry);
 
-	/* Cleanup chains remaining on LRU list. */
-	hammer2_spin_ex(&pmp->lru_spin);
-	while ((chain = TAILQ_FIRST(&pmp->lru_list)) != NULL) {
-		KKASSERT(chain->flags & HAMMER2_CHAIN_ONLRU);
-		atomic_add_int(&pmp->lru_count, -1);
-		atomic_clear_int(&chain->flags, HAMMER2_CHAIN_ONLRU);
-		TAILQ_REMOVE(&pmp->lru_list, chain, entry);
-		hammer2_chain_ref(chain);
-		hammer2_spin_unex(&pmp->lru_spin);
-		atomic_set_int(&chain->flags, HAMMER2_CHAIN_RELEASE);
-		hammer2_chain_drop(chain);
-		hammer2_spin_ex(&pmp->lru_spin);
-	}
-	hammer2_spin_unex(&pmp->lru_spin);
-
 	/* Clean up iroot. */
 	iroot = pmp->iroot;
 	if (iroot) {
@@ -393,8 +385,7 @@ hammer2_pfsfree(hammer2_pfs_t *pmp)
 		hprintf("PFS at %s still in use\n",
 		    pmp->mp->mnt_stat.f_mntonname);
 	} else {
-		hammer2_spin_destroy(&pmp->inum_spin);
-		hammer2_spin_destroy(&pmp->lru_spin);
+		hammer2_spin_destroy(&pmp->blockset_spin);
 		hammer2_spin_destroy(&pmp->list_spin);
 		for (i = 0; i < HAMMER2_IHASH_SIZE; i++) {
 			hammer2_lk_destroy(&pmp->xop_lock[i]);
@@ -402,10 +393,11 @@ hammer2_pfsfree(hammer2_pfs_t *pmp)
 		}
 		hammer2_lk_destroy(&pmp->trans_lock);
 		hammer2_lkc_destroy(&pmp->trans_cv);
+		hammer2_inum_hash_destroy(pmp);
 		hashfree(pmp->ipdep_lists, HAMMER2_IHASH_SIZE, M_HAMMER2);
 		if (pmp->fspec)
-			free(pmp->fspec, M_HAMMER2, 0);
-		free(pmp, M_HAMMER2, 0);
+			hfree(pmp->fspec, M_HAMMER2, strlen(pmp->fspec) + 1);
+		hfree(pmp, M_HAMMER2, sizeof(*pmp));
 	}
 }
 
@@ -457,7 +449,7 @@ again:
 			iroot->cluster.array[i].chain = NULL;
 			pmp->pfs_types[i] = HAMMER2_PFSTYPE_NONE;
 			if (pmp->pfs_names[i]) {
-				kstrfree(pmp->pfs_names[i]);
+				hstrfree(pmp->pfs_names[i]);
 				pmp->pfs_names[i] = NULL;
 			}
 			if (rchain) {
@@ -694,7 +686,7 @@ next_hmp:
 		}
 
 		/* Construct volumes and link with device vnodes. */
-		hmp = malloc(sizeof(*hmp), M_HAMMER2, M_WAITOK | M_ZERO);
+		hmp = hmalloc(sizeof(*hmp), M_HAMMER2, M_WAITOK | M_ZERO);
 		hmp->devvp = NULL;
 		error = hammer2_init_volumes(&devvpl, hmp->volumes,
 		    &hmp->voldata, &hmp->volhdrno, &hmp->devvp);
@@ -702,7 +694,7 @@ next_hmp:
 			hammer2_close_devvp(&devvpl, p);
 			hammer2_cleanup_devvp(&devvpl);
 			hammer2_lk_unlock(&hammer2_mntlk);
-			free(hmp, M_HAMMER2, 0);
+			hfree(hmp, M_HAMMER2, sizeof(*hmp));
 			return (error);
 		}
 		if (!hmp->devvp) {
@@ -717,8 +709,8 @@ next_hmp:
 		hmp->hflags = args->hflags & HMNT2_DEVFLAGS;
 
 		TAILQ_INSERT_TAIL(&hammer2_mntlist, hmp, mntentry);
-		RB_INIT(&hmp->iotree);
-		hammer2_mtx_init(&hmp->iotree_lock, "h2hmp_iotlk");
+		hammer2_mtx_init(&hmp->iohash_lock, "h2hmp_iohlk");
+		hammer2_io_hash_init(hmp);
 
 		hammer2_lk_init(&hmp->vollk, "h2vol");
 		hammer2_lk_init(&hmp->bulklk, "h2bulk");
@@ -857,7 +849,7 @@ next_hmp:
 		 *
 		 * The returned inode is locked with the supplied cluster.
 		 */
-		xop = pool_get(&hammer2_xops_pool, PR_WAITOK | PR_ZERO);
+		xop = pool_get(&hammer2_pool_xops, PR_WAITOK | PR_ZERO);
 		hammer2_dummy_xop_from_chain(xop, schain);
 		hammer2_inode_drop(spmp->iroot);
 		spmp->iroot = hammer2_inode_get(spmp, xop, -1, -1);
@@ -869,7 +861,7 @@ next_hmp:
 		hammer2_chain_unlock(schain);
 		hammer2_chain_drop(schain);
 		schain = NULL;
-		pool_put(&hammer2_xops_pool, xop);
+		pool_put(&hammer2_pool_xops, xop);
 		/* Leave spmp->iroot with one ref. */
 
 		if (!hmp->rdonly) {
@@ -996,7 +988,7 @@ next_hmp:
 
 	/* Keep devstr string in PFS mount. */
 	dlen = strlen(devstr) + strlen(label) + 1 + 1;
-	pmp->fspec = malloc(dlen, M_HAMMER2, M_WAITOK | M_ZERO);
+	pmp->fspec = hmalloc(dlen, M_HAMMER2, M_WAITOK | M_ZERO);
 	snprintf(pmp->fspec, dlen, "%s@%s", devstr, label);
 
 	/* Build f_mntfromspec buffer. */
@@ -1252,20 +1244,20 @@ again:
 	 * of these chains.
 	 */
 	if (hmp->vchain.flags & HAMMER2_CHAIN_MODIFIED) {
-		atomic_add_long(&hammer2_count_modified_chains, -1);
+		atomic_add_int(&hammer2_count_chain_modified, -1);
 		atomic_clear_int(&hmp->vchain.flags, HAMMER2_CHAIN_MODIFIED);
 	}
 	if (hmp->vchain.flags & HAMMER2_CHAIN_UPDATE)
 		atomic_clear_int(&hmp->vchain.flags, HAMMER2_CHAIN_UPDATE);
 
 	if (hmp->fchain.flags & HAMMER2_CHAIN_MODIFIED) {
-		atomic_add_long(&hammer2_count_modified_chains, -1);
+		atomic_add_int(&hammer2_count_chain_modified, -1);
 		atomic_clear_int(&hmp->fchain.flags, HAMMER2_CHAIN_MODIFIED);
 	}
 	if (hmp->fchain.flags & HAMMER2_CHAIN_UPDATE)
 		atomic_clear_int(&hmp->fchain.flags, HAMMER2_CHAIN_UPDATE);
 
-#ifdef INVARIANTS
+#ifdef DEBUG
 	hammer2_dump_chain(&hmp->vchain, 0, 0, -1, 'v');
 	hammer2_dump_chain(&hmp->fchain, 0, 0, -1, 'f');
 #endif
@@ -1277,16 +1269,17 @@ again:
 	hammer2_chain_drop(&hmp->vchain);
 	hammer2_chain_drop(&hmp->fchain);
 
-	hammer2_mtx_ex(&hmp->iotree_lock);
-	hammer2_io_cleanup(hmp, &hmp->iotree);
+	hammer2_mtx_ex(&hmp->iohash_lock);
+	hammer2_io_hash_cleanup_all(hmp);
 	if (hmp->iofree_count) {
 		hprintf("XXX %d I/O's left hanging\n", hmp->iofree_count);
 		//KKASSERT(0); /* XXX2 enable this */
 	}
-	hammer2_mtx_unlock(&hmp->iotree_lock);
+	hammer2_mtx_unlock(&hmp->iohash_lock);
 
 	TAILQ_REMOVE(&hammer2_mntlist, hmp, mntentry);
-	hammer2_mtx_destroy(&hmp->iotree_lock);
+	hammer2_mtx_destroy(&hmp->iohash_lock);
+	hammer2_io_hash_destroy(hmp);
 
 	hammer2_lk_destroy(&hmp->vollk);
 	hammer2_lk_destroy(&hmp->bulklk);
@@ -1295,7 +1288,25 @@ again:
 	hammer2_print_iostat(&hmp->iostat_read, "read");
 	hammer2_print_iostat(&hmp->iostat_write, "write");
 
-	free(hmp, M_HAMMER2, 0);
+	hfree(hmp, M_HAMMER2, sizeof(*hmp));
+
+	if (TAILQ_EMPTY(&hammer2_mntlist)) {
+		if (malloc_leak_m_hammer2)
+			hprintf("XXX M_HAMMER2 %d bytes leaked\n",
+			    malloc_leak_m_hammer2);
+		if (malloc_leak_m_hammer2_rbuf)
+			hprintf("XXX M_HAMMER2_RBUF %d bytes leaked\n",
+			    malloc_leak_m_hammer2_rbuf);
+		if (malloc_leak_m_hammer2_wbuf)
+			hprintf("XXX M_HAMMER2_WBUF %d bytes leaked\n",
+			    malloc_leak_m_hammer2_wbuf);
+		if (malloc_leak_m_hammer2_lz4)
+			hprintf("XXX M_HAMMER2_LZ4 %d bytes leaked\n",
+			    malloc_leak_m_hammer2_lz4);
+		if (malloc_leak_m_temp)
+			hprintf("XXX M_TEMP %d bytes leaked\n",
+			    malloc_leak_m_temp);
+	}
 }
 
 /*
@@ -1355,7 +1366,7 @@ hammer2_recovery(hammer2_dev_t *hmp)
 		TAILQ_REMOVE(&info.list, elm, entry);
 		parent = elm->chain;
 		sync_tid = elm->sync_tid;
-		free(elm, M_HAMMER2, 0);
+		hfree(elm, M_HAMMER2, sizeof(*elm));
 
 		hammer2_chain_lock(parent, HAMMER2_RESOLVE_ALWAYS);
 		error |= hammer2_recovery_scan(hmp, parent, &info,
@@ -1422,7 +1433,7 @@ hammer2_recovery_scan(hammer2_dev_t *hmp, hammer2_chain_t *parent,
 
 	/* Defer operation if depth limit reached. */
 	if (info->depth >= HAMMER2_RECOVERY_MAXDEPTH) {
-		elm = malloc(sizeof(*elm), M_HAMMER2, M_ZERO | M_WAITOK);
+		elm = hmalloc(sizeof(*elm), M_HAMMER2, M_ZERO | M_WAITOK);
 		elm->chain = parent;
 		elm->sync_tid = sync_tid;
 		hammer2_chain_ref(parent);
@@ -1547,34 +1558,49 @@ hammer2_fixup_pfses(hammer2_dev_t *hmp)
 }
 
 static int
-hammer2_remount(hammer2_dev_t *hmp, struct mount *mp)
+hammer2_do_recovery(hammer2_dev_t *hmp)
 {
 	hammer2_volume_t *vol;
 	int i, error = 0;
+
+	for (i = 0; i < hmp->nvolumes; ++i) {
+		vol = &hmp->volumes[i];
+		if (vol->id == HAMMER2_ROOT_VOLUME) {
+			error = hammer2_recovery(hmp);
+			if (error == 0)
+				error |= hammer2_fixup_pfses(hmp);
+		}
+		if (error)
+			return (hammer2_error_to_errno(error));
+	}
+	KKASSERT(i == hmp->nvolumes);
+	KKASSERT(error == 0);
+
+	return (0);
+}
+
+static int
+hammer2_remount(hammer2_dev_t *hmp, struct mount *mp)
+{
+	int error;
 
 	if (!hmp->rdonly && (mp->mnt_flag & MNT_RDONLY)) {
 		hprintf("update to read-only mount unsupported\n");
 		error = EOPNOTSUPP;
 	} else if (hmp->rdonly && (mp->mnt_flag & MNT_WANTRDWR)) {
-		for (i = 0; i < hmp->nvolumes; ++i) {
-			vol = &hmp->volumes[i];
-			if (vol->id == HAMMER2_ROOT_VOLUME) {
-				error = hammer2_recovery(hmp);
-				if (error == 0)
-					error |= hammer2_fixup_pfses(hmp);
-			}
-			if (error)
-				return (hammer2_error_to_errno(error));
-		}
-		KKASSERT(i == hmp->nvolumes);
-		KKASSERT(error == 0);
-
+		error = hammer2_do_recovery(hmp);
+		if (error)
+			return (error);
 		hmp->rdonly = 0;
 	} else {
-		debug_hprintf("nothing changed\n");
+		debug_hprintf("ro/rw unchanged\n");
+		error = hammer2_do_recovery(hmp);
+		if (error)
+			return (error);
 	}
 
-	debug_hprintf("MNT_RDONLY %d rdonly %d error %d\n",
+	debug_hprintf("MNT_WANTRDWR %d MNT_RDONLY %d rdonly %d error %d\n",
+	    (mp->mnt_flag & MNT_WANTRDWR) ? 1 : 0,
 	    (mp->mnt_flag & MNT_RDONLY) ? 1 : 0, hmp->rdonly, error);
 
 	return (error);
@@ -1727,14 +1753,10 @@ restart:
 				/*
 				 * Failed to get the vnode, requeue the inode
 				 * (PASS2 is already set so it will be found
-				 * again on the restart).
-				 *
-				 * Then unlock, possibly sleep, and retry
-				 * later.  We sleep if PASS2 was *previously*
-				 * set, before we set it again above.
+				 * again on the restart).  Then unlock.
 				 */
 				vp = NULL;
-				dorestart = 1;
+				dorestart |= 1;
 				debug_hprintf("inum %016jx vn_lock failed\n",
 				    (intmax_t)ip->meta.inum);
 				hammer2_inode_delayed_sideq(ip);
@@ -1742,8 +1764,13 @@ restart:
 				hammer2_mtx_unlock(&ip->lock);
 				hammer2_inode_drop(ip);
 
+				/*
+				 * If PASS2 was previously set we might
+				 * be looping too hard, ask for a delay
+				 * along with the restart.
+				 */
 				if (pass2 & HAMMER2_INODE_SYNCQ_PASS2)
-					tsleep(&dorestart, 0, "h2syndel", 2);
+					dorestart |= 2;
 				hammer2_spin_ex(&pmp->list_spin);
 				continue;
 			}
@@ -1762,7 +1789,7 @@ restart:
 			hammer2_inode_drop(ip);
 			if (vp)
 				vput(vp);
-			dorestart = 1;
+			dorestart |= 1;
 			hammer2_spin_ex(&pmp->list_spin);
 			continue;
 		}
@@ -1850,6 +1877,17 @@ restart:
 	hammer2_spin_unex(&pmp->list_spin);
 
 	if (dorestart || (pmp->trans.flags & HAMMER2_TRANS_RESCAN)) {
+		/*
+		 * bit 2 is set if something above thinks we might be
+		 * looping too hard, try to unclog the frontend
+		 * dependency and wait a bit before restarting.
+		 *
+		 * NOTE: The frontend could be stuck in h2memw, though
+		 *	 it isn't supposed to be holding vnode locks
+		 *	 in that case.
+		 */
+		if (dorestart & 2)
+			tsleep(&dorestart, 0, "h2syndel", 2);
 		debug_hprintf("FILESYSTEM SYNC STAGE 1 RESTART\n");
 		dorestart = 1;
 		goto restart;
@@ -2150,7 +2188,7 @@ void
 hammer2_voldata_modify(hammer2_dev_t *hmp)
 {
 	if ((hmp->vchain.flags & HAMMER2_CHAIN_MODIFIED) == 0) {
-		atomic_add_long(&hammer2_count_modified_chains, 1);
+		atomic_add_int(&hammer2_count_chain_modified, 1);
 		atomic_set_int(&hmp->vchain.flags, HAMMER2_CHAIN_MODIFIED);
 		hmp->vchain.bref.mirror_tid = hmp->voldata.mirror_tid + 1;
 	}

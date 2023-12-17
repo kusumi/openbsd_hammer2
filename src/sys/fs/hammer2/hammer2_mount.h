@@ -69,22 +69,28 @@ struct hammer2_mount_info {
 
 /* for sbin/sysctl/sysctl.c */
 #define HAMMER2CTL_SUPPORTED_VERSION	1
-#define HAMMER2CTL_INODE_ALLOCS		2
-#define HAMMER2CTL_CHAIN_ALLOCS		3
-#define HAMMER2CTL_DIO_ALLOCS		4
-#define HAMMER2CTL_DIO_LIMIT		5
-#define HAMMER2CTL_LIMIT_SCAN_DEPTH	6
-#define HAMMER2CTL_LIMIT_SAVED_CHAINS	7
-#define HAMMER2CTL_ALWAYS_COMPRESS	8
-#define HAMMER2CTL_MAXID		9
+#define HAMMER2CTL_DEDUP_ENABLE		2
+#define HAMMER2CTL_INODE_ALLOCATED	3
+#define HAMMER2CTL_CHAIN_ALLOCATED	4
+#define HAMMER2CTL_CHAIN_MODIFIED	5
+#define HAMMER2CTL_DIO_ALLOCATED	6
+#define HAMMER2CTL_DIO_LIMIT		7
+#define HAMMER2CTL_BULKFREE_TPS		8
+#define HAMMER2CTL_LIMIT_SCAN_DEPTH	9
+#define HAMMER2CTL_LIMIT_SAVED_CHAINS	10
+#define HAMMER2CTL_ALWAYS_COMPRESS	11
+#define HAMMER2CTL_MAXID		12
 
 #define HAMMER2_NAMES { \
 	{ 0, 0, }, \
 	{ "supported_version", CTLTYPE_INT, }, \
-	{ "inode_allocs", CTLTYPE_INT, }, \
-	{ "chain_allocs", CTLTYPE_INT, }, \
-	{ "dio_allocs", CTLTYPE_INT, }, \
+	{ "dedup_enable", CTLTYPE_INT, }, \
+	{ "inode_allocated", CTLTYPE_INT, }, \
+	{ "chain_allocated", CTLTYPE_INT, }, \
+	{ "chain_modified", CTLTYPE_INT, }, \
+	{ "dio_allocated", CTLTYPE_INT, }, \
 	{ "dio_limit", CTLTYPE_INT, }, \
+	{ "bulkfree_tps", CTLTYPE_INT, }, \
 	{ "limit_scan_depth", CTLTYPE_INT, }, \
 	{ "limit_saved_chains", CTLTYPE_INT, }, \
 	{ "always_compress", CTLTYPE_INT, }, \

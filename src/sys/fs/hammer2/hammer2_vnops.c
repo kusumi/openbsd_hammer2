@@ -2521,7 +2521,7 @@ hammer2_vinit(struct mount *mp, struct vnode **vpp)
 	}
 
 	if (ip->meta.inum == 1)
-                vp->v_flag |= VROOT;
+		vp->v_flag |= VROOT;
 	*vpp = vp;
 
 	return (0);

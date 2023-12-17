@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
- * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
+ * Copyright (c) 2011-2023 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
  * by Matthew Dillon <dillon@dragonflybsd.org>
@@ -41,18 +41,32 @@ static void hammer2_inode_repoint(hammer2_inode_t *, hammer2_cluster_t *);
 static void hammer2_inode_repoint_one(hammer2_inode_t *, hammer2_cluster_t *,
     int);
 
-static int
-hammer2_inode_cmp(const hammer2_inode_t *ip1, const hammer2_inode_t *ip2)
+/*
+ * Initialize inum hash in fresh structure.
+ */
+void
+hammer2_inum_hash_init(hammer2_pfs_t *pmp)
 {
-	if (ip1->meta.inum < ip2->meta.inum)
-		return (-1);
-	if (ip1->meta.inum > ip2->meta.inum)
-		return (1);
-	return (0);
+	hammer2_inum_hash_t *hash;
+	int i;
+
+	for (i = 0; i < HAMMER2_INUMHASH_SIZE; ++i) {
+		hash = &pmp->inumhash[i];
+		hammer2_spin_init(&hash->spin, "h2pmp_hasp");
+	}
 }
 
-RB_GENERATE_STATIC(hammer2_inode_tree, hammer2_inode, rbnode,
-    hammer2_inode_cmp);
+void
+hammer2_inum_hash_destroy(hammer2_pfs_t *pmp)
+{
+	hammer2_inum_hash_t *hash;
+	int i;
+
+	for (i = 0; i < HAMMER2_INUMHASH_SIZE; ++i) {
+		hash = &pmp->inumhash[i];
+		hammer2_spin_destroy(&hash->spin);
+	}
+}
 
 /*
  * Caller holds pmp->list_spin and the inode should be locked.  Merge ip
@@ -241,9 +255,7 @@ hammer2_inode_lock(hammer2_inode_t *ip, int how)
 			continue;
 		}
 		hammer2_spin_unex(&pmp->list_spin);
-#ifdef INVARIANTS
 		hammer2_mtx_assert_ex(&ip->lock);
-#endif
 		break;
 	}
 }
@@ -460,25 +472,37 @@ hammer2_inode_lock_temp_restore(hammer2_inode_t *ip, int ostate)
 	hammer2_mtx_temp_restore(&ip->lock, ostate);
 }
 
+static __inline hammer2_inum_hash_t *
+inumhash(hammer2_pfs_t *pmp, hammer2_tid_t inum)
+{
+	int hv;
+
+	hv = (int)inum;
+	return (&pmp->inumhash[hv & HAMMER2_INUMHASH_MASK]);
+}
+
 /*
  * Lookup an inode by inode number.
  */
 hammer2_inode_t *
 hammer2_inode_lookup(hammer2_pfs_t *pmp, hammer2_tid_t inum)
 {
-	hammer2_inode_t *ip, find;
+	hammer2_inum_hash_t *hash;
+	hammer2_inode_t *ip;
 
 	KKASSERT(pmp);
 	if (pmp->spmp_hmp) {
 		ip = NULL;
 	} else {
-		hammer2_spin_ex(&pmp->inum_spin);
-		bzero(&find, sizeof(find));
-		find.meta.inum = inum;
-		ip = RB_FIND(hammer2_inode_tree, &pmp->inum_tree, &find);
-		if (ip)
-			hammer2_inode_ref(ip);
-		hammer2_spin_unex(&pmp->inum_spin);
+		hash = inumhash(pmp, inum);
+		hammer2_spin_sh(&hash->spin);
+		for (ip = hash->base; ip; ip = ip->next) {
+			if (ip->meta.inum == inum) {
+				hammer2_inode_ref(ip);
+				break;
+			}
+		}
+		hammer2_spin_unsh(&hash->spin);
 	}
 
 	return (ip);
@@ -517,6 +541,8 @@ void
 hammer2_inode_drop(hammer2_inode_t *ip)
 {
 	hammer2_pfs_t *pmp;
+	hammer2_inum_hash_t *hash;
+	hammer2_inode_t **xipp;
 	unsigned int refs;
 
 	while (ip) {
@@ -531,18 +557,22 @@ hammer2_inode_drop(hammer2_inode_t *ip)
 			 */
 			pmp = ip->pmp;
 			KKASSERT(pmp);
-			hammer2_spin_ex(&pmp->inum_spin);
+			hash = inumhash(pmp, ip->meta.inum);
 
+			hammer2_spin_ex(&hash->spin);
 			if (atomic_cmpset_int(&ip->refs, 1, 0)) {
 				//KKASSERT(hammer2_mtx_refs(&ip->lock) == 0);
 				hammer2_inode_drop_assert(ip);
-				if (ip->flags & HAMMER2_INODE_ONRBTREE) {
+				if (ip->flags & HAMMER2_INODE_ONHASH) {
+					xipp = &hash->base;
+					while (*xipp != ip)
+						xipp = &(*xipp)->next;
+					*xipp = ip->next;
+					ip->next = NULL;
 					atomic_clear_int(&ip->flags,
-					    HAMMER2_INODE_ONRBTREE);
-					RB_REMOVE(hammer2_inode_tree,
-					    &pmp->inum_tree, ip);
+					    HAMMER2_INODE_ONHASH);
 				}
-				hammer2_spin_unex(&pmp->inum_spin);
+				hammer2_spin_unex(&hash->spin);
 				ip->pmp = NULL;
 
 				/*
@@ -556,11 +586,12 @@ hammer2_inode_drop(hammer2_inode_t *ip)
 				hammer2_spin_destroy(&ip->cluster_spin);
 				/* ip->vhold isn't necessarily zero. */
 
-				pool_put(&hammer2_inode_pool, ip);
-				atomic_add_int(&hammer2_inode_allocs, -1);
+				pool_put(&hammer2_pool_inode, ip);
+				atomic_add_int(&hammer2_count_inode_allocated,
+				    -1);
 				ip = NULL; /* Will terminate loop. */
 			} else {
-				hammer2_spin_unex(&ip->pmp->inum_spin);
+				hammer2_spin_unex(&hash->spin);
 			}
 		} else {
 			/* Non zero transition. */
@@ -676,7 +707,8 @@ hammer2_inode_t *
 hammer2_inode_get(hammer2_pfs_t *pmp, hammer2_xop_head_t *xop,
     hammer2_tid_t inum, int idx)
 {
-	hammer2_inode_t *nip;
+	hammer2_inum_hash_t *hash;
+	hammer2_inode_t *nip, *xip, **xipp;
 	const hammer2_inode_data_t *iptmp, *nipdata;
 
 	KKASSERT(xop == NULL ||
@@ -710,7 +742,7 @@ again:
 		 * which can't index inodes due to duplicative inode numbers).
 		 */
 		if (pmp->spmp_hmp == NULL &&
-		    (nip->flags & HAMMER2_INODE_ONRBTREE) == 0) {
+		    (nip->flags & HAMMER2_INODE_ONHASH) == 0) {
 			hammer2_mtx_unlock(&nip->lock);
 			hammer2_inode_drop(nip);
 			goto again;
@@ -729,8 +761,8 @@ again:
 	 * We couldn't find the inode number, create a new inode and try to
 	 * insert it, handle insertion races.
 	 */
-	nip = pool_get(&hammer2_inode_pool, PR_WAITOK | PR_ZERO);
-	atomic_add_int(&hammer2_inode_allocs, 1);
+	nip = pool_get(&hammer2_pool_inode, PR_WAITOK | PR_ZERO);
+	atomic_add_int(&hammer2_count_inode_allocated, 1);
 	hammer2_spin_init(&nip->cluster_spin, "h2ip_clsp");
 
 	nip->cluster.pmp = pmp;
@@ -768,15 +800,22 @@ again:
 	 * get.  Undo all the work and try again.
 	 */
 	if (pmp->spmp_hmp == NULL) {
-		hammer2_spin_ex(&pmp->inum_spin);
-		if (RB_INSERT(hammer2_inode_tree, &pmp->inum_tree, nip)) {
-			hammer2_spin_unex(&pmp->inum_spin);
-			hammer2_mtx_unlock(&nip->lock);
-			hammer2_inode_drop(nip);
-			goto again;
+		hash = inumhash(pmp, nip->meta.inum);
+		hammer2_spin_ex(&hash->spin);
+		for (xipp = &hash->base;
+		    (xip = *xipp) != NULL;
+		    xipp = &xip->next) {
+			if (xip->meta.inum == nip->meta.inum) {
+				hammer2_spin_unex(&hash->spin);
+				hammer2_mtx_unlock(&nip->lock);
+				hammer2_inode_drop(nip);
+				goto again;
+			}
 		}
-		atomic_set_int(&nip->flags, HAMMER2_INODE_ONRBTREE);
-		hammer2_spin_unex(&pmp->inum_spin);
+		nip->next = NULL;
+		*xipp = nip;
+		atomic_set_int(&nip->flags, HAMMER2_INODE_ONHASH);
+		hammer2_spin_unex(&hash->spin);
 	}
 
 	return (nip);
@@ -1106,6 +1145,22 @@ hammer2_inode_repoint(hammer2_inode_t *ip, hammer2_cluster_t *cluster)
 
 	bzero(dropch, sizeof(dropch));
 
+	/* Drop any cached (typically data) chains related to this inode. */
+	hammer2_spin_ex(&ip->cluster_spin);
+	for (i = 0; i < ip->ccache_nchains; ++i) {
+		dropch[i] = ip->ccache[i].chain;
+		ip->ccache[i].flags = 0;
+		ip->ccache[i].chain = NULL;
+	}
+	ip->ccache_nchains = 0;
+	hammer2_spin_unex(&ip->cluster_spin);
+
+	while (--i >= 0)
+		if (dropch[i]) {
+			hammer2_chain_drop(dropch[i]);
+			dropch[i] = NULL;
+		}
+
 	/*
 	 * Replace chains in ip->cluster with chains from cluster and
 	 * adjust the focus if necessary.
@@ -1170,9 +1225,24 @@ static void
 hammer2_inode_repoint_one(hammer2_inode_t *ip, hammer2_cluster_t *cluster,
     int idx)
 {
+	hammer2_chain_t *dropch[HAMMER2_MAXCLUSTER];
 	hammer2_chain_t *ochain, *nchain;
 	int i;
 
+	/* Drop any cached (typically data) chains related to this inode. */
+	hammer2_spin_ex(&ip->cluster_spin);
+	for (i = 0; i < ip->ccache_nchains; ++i) {
+		dropch[i] = ip->ccache[i].chain;
+		ip->ccache[i].chain = NULL;
+	}
+	ip->ccache_nchains = 0;
+	hammer2_spin_unex(&ip->cluster_spin);
+
+	while (--i >= 0)
+		if (dropch[i])
+			hammer2_chain_drop(dropch[i]);
+
+	/* Replace inode chain at index. */
 	hammer2_spin_ex(&ip->cluster_spin);
 	KKASSERT(idx < cluster->nchains);
 	if (idx < ip->cluster.nchains) {

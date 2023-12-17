@@ -599,7 +599,7 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 		KKASSERT((chain->flags & HAMMER2_CHAIN_UPDATE) ||
 		    chain->parent == NULL);
 		atomic_clear_int(&chain->flags, HAMMER2_CHAIN_MODIFIED);
-		atomic_add_long(&hammer2_count_modified_chains, -1);
+		atomic_add_int(&hammer2_count_chain_modified, -1);
 
 		/*
 		 * Issue the flush.  This is indirect via the DIO.
@@ -613,10 +613,11 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 		 *	 further modifications to the buffer.  Chains with
 		 *	 embedded data don't need this.
 		 */
-		debug_hprintf("flush %s chain %016jx %016jx/%d\n",
-		    hammer2_breftype_to_str(chain->bref.type),
-		    (intmax_t)chain->bref.data_off,
-		    (intmax_t)chain->bref.key, chain->bref.keybits);
+		if (chain->bref.type != HAMMER2_BREF_TYPE_DATA)
+			debug_hprintf("flush %s chain %016jx %016jx/%d\n",
+			    hammer2_breftype_to_str(chain->bref.type),
+			    (intmax_t)chain->bref.data_off,
+			    (intmax_t)chain->bref.key, chain->bref.keybits);
 
 		/*
 		 * Update chain CRCs for flush.
@@ -1133,10 +1134,10 @@ hammer2_xop_inode_flush(hammer2_xop_t *arg, void *scratch, int clindex)
 
 			/* XXX cluster */
 			if (ip == pmp->iroot && pmp != hmp->spmp) {
-				hammer2_spin_ex(&pmp->inum_spin);
+				hammer2_spin_ex(&pmp->blockset_spin);
 				pmp->pfs_iroot_blocksets[clindex] =
 				    chain->data->ipdata.u.blockset;
-				hammer2_spin_unex(&pmp->inum_spin);
+				hammer2_spin_unex(&pmp->blockset_spin);
 			}
 		}
 		if (chain->flags & HAMMER2_CHAIN_PFSBOUNDARY)

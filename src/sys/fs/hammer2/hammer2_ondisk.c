@@ -129,7 +129,6 @@ hammer2_open_devvp(struct mount *mp, const hammer2_devvp_list_t *devvpl,
 			e->xflags = FREAD;
 		else
 			e->xflags = FREAD|FWRITE;
-
 		error = VOP_OPEN(devvp, e->xflags, FSCRED, runp);
 		if (error) {
 			hprintf("VOP_OPEN failed %d\n", error);
@@ -176,15 +175,14 @@ hammer2_init_devvp(struct mount *mp, const char *blkdevs,
 	hammer2_devvp_t *e;
 	struct vnode *devvp;
 	const char *p;
-	char *path;
-	char fname[MNAMELEN];
+	char *path, fname[MNAMELEN];
 	int i, error = 0;
 
 	KKASSERT(TAILQ_EMPTY(devvpl));
 	KKASSERT(blkdevs); /* Could be empty string. */
 	p = blkdevs;
 
-	path = malloc(MAXPATHLEN, M_TEMP, M_WAITOK | M_ZERO);
+	path = hmalloc(MAXPATHLEN, M_TEMP, M_WAITOK | M_ZERO);
 	while (1) {
 		strlcpy(path, "", MAXPATHLEN);
 		if (*p != '/')
@@ -227,12 +225,13 @@ hammer2_init_devvp(struct mount *mp, const char *blkdevs,
 		KKASSERT(devvp);
 
 		/* Keep device vnode and path. */
-		e = malloc(sizeof(*e), M_HAMMER2, M_WAITOK | M_ZERO);
+		e = hmalloc(sizeof(*e), M_HAMMER2, M_WAITOK | M_ZERO);
 		e->devvp = devvp;
-		e->path = kstrdup(path);
-		e->fname = kstrdup(fname);
+		e->path = hstrdup(path);
+		e->fname = hstrdup(fname);
 		TAILQ_INSERT_TAIL(devvpl, e, entry);
 	}
+	hfree(path, M_TEMP, MAXPATHLEN);
 
 	return (error);
 }
@@ -253,15 +252,15 @@ hammer2_cleanup_devvp(hammer2_devvp_list_t *devvpl)
 
 		/* Cleanup path. */
 		KKASSERT(e->path);
-		kstrfree(e->path);
+		hstrfree(e->path);
 		e->path = NULL;
 
 		/* Cleanup fname. */
 		KKASSERT(e->fname);
-		kstrfree(e->fname);
+		hstrfree(e->fname);
 		e->fname = NULL;
 
-		free(e, M_HAMMER2, 0);
+		hfree(e, M_HAMMER2, sizeof(*e));
 	}
 }
 
@@ -667,7 +666,7 @@ hammer2_init_volumes(const hammer2_devvp_list_t *devvpl,
 		vol->size = (hammer2_off_t)-1;
 	}
 
-	voldata = malloc(sizeof(*voldata), M_HAMMER2, M_WAITOK | M_ZERO);
+	voldata = hmalloc(sizeof(*voldata), M_HAMMER2, M_WAITOK | M_ZERO);
 	bzero(&fsid, sizeof(fsid));
 	bzero(&fstype, sizeof(fstype));
 	bzero(rootvoldata, sizeof(*rootvoldata));
@@ -765,7 +764,7 @@ done:
 		if (!error)
 			error = hammer2_verify_volumes(volumes, rootvoldata);
 	}
-	free(voldata, M_HAMMER2, 0);
+	hfree(voldata, M_HAMMER2, sizeof(*voldata));
 
 	return (error);
 }

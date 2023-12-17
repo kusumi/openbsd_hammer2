@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Copyright (c) 2022-2023 Tomohiro Kusumi <tkusumi@netbsd.org>
- * Copyright (c) 2011-2022 The DragonFly Project.  All rights reserved.
+ * Copyright (c) 2013-2023 The DragonFly Project.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
  * by Matthew Dillon <dillon@dragonflybsd.org>
@@ -48,32 +48,42 @@
  * buffers to be used against hammer2_chain's using smaller allocations,
  * without causing deadlocks.
  */
-static int hammer2_io_cleanup_callback(hammer2_io_t *, void *);
-
-static int
-hammer2_io_cmp(const hammer2_io_t *io1, const hammer2_io_t *io2)
-{
-	if (io1->pbase < io2->pbase)
-		return (-1);
-	if (io1->pbase > io2->pbase)
-		return (1);
-	return (0);
-}
-
-RB_GENERATE_STATIC(hammer2_io_tree, hammer2_io, rbnode, hammer2_io_cmp);
-RB_SCAN_INFO(hammer2_io_tree, hammer2_io);
-RB_GENERATE_SCAN_STATIC(hammer2_io_tree, hammer2_io, rbnode);
-
-struct hammer2_cleanupcb_info {
-	struct hammer2_io_tree	tmptree;
-	int			count;
-};
+static hammer2_io_t *hammer2_io_hash_lookup(hammer2_dev_t *, hammer2_off_t,
+    uint64_t *);
+static hammer2_io_t *hammer2_io_hash_enter(hammer2_dev_t *, hammer2_io_t *,
+    uint64_t *);
+static void hammer2_io_hash_cleanup(hammer2_dev_t *, int);
 
 static __inline void
 hammer2_assert_io_refs(hammer2_io_t *dio)
 {
+	KKASSERT(dio);
 	hammer2_mtx_assert_ex(&dio->lock);
 	KKASSERT((dio->refs & HAMMER2_DIO_MASK) != 0);
+}
+
+void
+hammer2_io_hash_init(hammer2_dev_t *hmp)
+{
+	hammer2_io_hash_t *hash;
+	int i;
+
+	for (i = 0; i < HAMMER2_IOHASH_SIZE; ++i) {
+		hash = &hmp->iohash[i];
+		hammer2_spin_init(&hash->spin, "h2io_hasp");
+	}
+}
+
+void
+hammer2_io_hash_destroy(hammer2_dev_t *hmp)
+{
+	hammer2_io_hash_t *hash;
+	int i;
+
+	for (i = 0; i < HAMMER2_IOHASH_SIZE; ++i) {
+		hash = &hmp->iohash[i];
+		hammer2_spin_destroy(&hash->spin);
+	}
 }
 
 /*
@@ -84,12 +94,11 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_off_t data_off, uint8_t btype,
     int createit)
 {
 	hammer2_volume_t *vol;
-	hammer2_io_t *dio, *xio, find;
+	hammer2_io_t *dio, *xio;
 	hammer2_off_t lbase, pbase, pmask;
-	uint64_t refs;
 	int lsize, psize;
 
-	hammer2_mtx_assert_ex(&hmp->iotree_lock);
+	hammer2_mtx_assert_ex(&hmp->iohash_lock);
 
 	psize = HAMMER2_PBUFSIZE;
 	pmask = ~(hammer2_off_t)(psize - 1);
@@ -105,17 +114,12 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_off_t data_off, uint8_t btype,
 		    (intmax_t)pbase, (intmax_t)lbase, lsize, (intmax_t)pmask);
 
 	/* Access or allocate dio, bump dio->refs to prevent destruction. */
-	bzero(&find, sizeof(find));
-	find.pbase = pbase;
-	dio = RB_FIND(hammer2_io_tree, &hmp->iotree, &find);
+	dio = hammer2_io_hash_lookup(hmp, pbase, NULL);
 	if (dio) {
-		hammer2_mtx_ex(&dio->lock);
-		refs = dio->refs++;
-		if ((refs & HAMMER2_DIO_MASK) == 0)
-			atomic_add_int(&dio->hmp->iofree_count, -1);
+		/* NOP */
 	} else if (createit) {
 		vol = hammer2_get_volume(hmp, pbase);
-		dio = malloc(sizeof(*dio), M_HAMMER2, M_WAITOK | M_ZERO);
+		dio = hmalloc(sizeof(*dio), M_HAMMER2, M_WAITOK | M_ZERO);
 		dio->hmp = hmp;
 		dio->devvp = vol->dev->devvp;
 		dio->dbase = vol->offset;
@@ -127,16 +131,13 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_off_t data_off, uint8_t btype,
 		dio->act = 5;
 		hammer2_mtx_init(&dio->lock, "h2io_inplk");
 		hammer2_mtx_ex(&dio->lock);
-		xio = RB_INSERT(hammer2_io_tree, &hmp->iotree, dio);
+		xio = hammer2_io_hash_enter(hmp, dio, NULL);
 		if (xio == NULL) {
-			atomic_add_int(&hammer2_dio_allocs, 1);
+			atomic_add_int(&hammer2_count_dio_allocated, 1);
 		} else {
-			refs = xio->refs++;
-			if ((refs & HAMMER2_DIO_MASK) == 0)
-				atomic_add_int(&xio->hmp->iofree_count, -1);
 			hammer2_mtx_unlock(&dio->lock);
 			hammer2_mtx_destroy(&dio->lock);
-			free(dio, M_HAMMER2, 0);
+			hfree(dio, M_HAMMER2, sizeof(*dio));
 			dio = xio;
 			hammer2_mtx_ex(&dio->lock);
 		}
@@ -181,7 +182,7 @@ hammer2_io_getblk(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
 
 	KKASSERT((1 << (int)(lbase & HAMMER2_OFF_MASK_RADIX)) == lsize);
 
-	hammer2_mtx_ex(&hmp->iotree_lock);
+	hammer2_mtx_ex(&hmp->iohash_lock);
 	if (op == HAMMER2_DOP_READQ) {
 		dio = hammer2_io_alloc(hmp, lbase, btype, 0);
 		if (dio == NULL)
@@ -192,7 +193,7 @@ hammer2_io_getblk(hammer2_dev_t *hmp, int btype, hammer2_off_t lbase, int lsize,
 	}
 	KKASSERT(dio);
 	hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
-	hammer2_mtx_unlock(&hmp->iotree_lock);
+	hammer2_mtx_unlock(&hmp->iohash_lock);
 
 	/* Buffer is already GOOD, handle the op and return. */
 	if (dio->refs & HAMMER2_DIO_GOOD) {
@@ -274,7 +275,6 @@ hammer2_io_putblk(hammer2_io_t **diop)
 	hammer2_dev_t *hmp;
 	hammer2_io_t *dio;
 	struct buf *bp;
-	struct hammer2_cleanupcb_info info;
 	uint64_t orefs;
 	int dio_limit;
 
@@ -353,77 +353,15 @@ hammer2_io_putblk(hammer2_io_t **diop)
 	 * We cache free buffers so re-use cases can use a shared lock,
 	 * but if too many build up we have to clean them out.
 	 */
-	hammer2_mtx_ex(&hmp->iotree_lock);
+	hammer2_mtx_ex(&hmp->iohash_lock);
 	dio_limit = hammer2_dio_limit;
 	if (dio_limit < 256)
 		dio_limit = 256;
 	if (dio_limit > 1024*1024)
 		dio_limit = 1024*1024;
-	if (hmp->iofree_count > dio_limit) {
-		RB_INIT(&info.tmptree);
-		if (hmp->iofree_count > dio_limit) {
-			info.count = hmp->iofree_count / 5;
-			RB_SCAN(hammer2_io_tree, &hmp->iotree, NULL,
-			    hammer2_io_cleanup_callback, &info);
-		}
-		hammer2_io_cleanup(hmp, &info.tmptree);
-	}
-	hammer2_mtx_unlock(&hmp->iotree_lock);
-}
-
-/*
- * Cleanup dio with zero refs.
- */
-static int
-hammer2_io_cleanup_callback(hammer2_io_t *dio, void *arg)
-{
-	struct hammer2_cleanupcb_info *info = arg;
-	hammer2_io_t *xio __diagused;
-	int act;
-
-	/* Only putblk'd dio does not require locking. */
-	hammer2_mtx_ex(&dio->lock);
-	if ((dio->refs & HAMMER2_DIO_MASK) == 0) {
-		if (dio->act > 0) {
-			act = dio->act - (getticks() - dio->ticks) / hz - 1;
-			if (act > 0) {
-				dio->act = act;
-				hammer2_mtx_unlock(&dio->lock);
-				return (0);
-			}
-			dio->act = 0;
-		}
-		KKASSERT(dio->bp == NULL);
-		if (info->count > 0) {
-			RB_REMOVE(hammer2_io_tree, &dio->hmp->iotree, dio);
-			xio = RB_INSERT(hammer2_io_tree, &info->tmptree, dio);
-			KKASSERT(xio == NULL);
-			--info->count;
-		}
-	}
-	hammer2_mtx_unlock(&dio->lock);
-
-	return (0);
-}
-
-void
-hammer2_io_cleanup(hammer2_dev_t *hmp, hammer2_io_tree_t *tree)
-{
-	hammer2_io_t *dio;
-
-	while ((dio = RB_ROOT(tree)) != NULL) {
-		RB_REMOVE(hammer2_io_tree, tree, dio);
-		KKASSERT(dio->bp == NULL &&
-		    (dio->refs & HAMMER2_DIO_MASK) == 0);
-		if (dio->refs & HAMMER2_DIO_DIRTY)
-			hprintf("dirty buffer %016jx/%d\n",
-			    (intmax_t)dio->pbase, dio->psize);
-
-		hammer2_mtx_destroy(&dio->lock);
-		free(dio, M_HAMMER2, 0);
-		atomic_add_int(&hammer2_dio_allocs, -1);
-		atomic_add_int(&hmp->iofree_count, -1);
-	}
+	if (hmp->iofree_count > dio_limit)
+		hammer2_io_hash_cleanup(hmp, dio_limit);
+	hammer2_mtx_unlock(&hmp->iohash_lock);
 }
 
 char *
@@ -515,6 +453,184 @@ hammer2_io_bqrelse(hammer2_io_t **diop)
 	hammer2_io_putblk(diop);
 }
 
+static __inline hammer2_io_hash_t *
+hammer2_io_hashv(hammer2_dev_t *hmp, hammer2_off_t pbase)
+{
+	int hv;
+
+	hv = (int)pbase + (int)(pbase >> 16);
+	return (&hmp->iohash[hv & HAMMER2_IOHASH_MASK]);
+}
+
+/*
+ * Lookup and reference the requested dio.
+ */
+static hammer2_io_t *
+hammer2_io_hash_lookup(hammer2_dev_t *hmp, hammer2_off_t pbase, uint64_t *refsp)
+{
+	hammer2_io_hash_t *hash;
+	hammer2_io_t *dio;
+	uint64_t refs;
+
+	hammer2_mtx_assert_ex(&hmp->iohash_lock);
+
+	if (refsp)
+		*refsp = 0;
+
+	hash = hammer2_io_hashv(hmp, pbase);
+	//hammer2_spin_sh(&hash->spin);
+	for (dio = hash->base; dio; dio = dio->next) {
+		if (dio->pbase == pbase) {
+			hammer2_mtx_ex(&dio->lock);
+			refs = dio->refs++;
+			if ((refs & HAMMER2_DIO_MASK) == 0)
+				atomic_add_int(&dio->hmp->iofree_count, -1);
+			if (refsp)
+				*refsp = refs;
+			break;
+		}
+	}
+	//hammer2_spin_unsh(&hash->spin);
+
+	if (dio)
+		hammer2_assert_io_refs(dio);
+	return (dio);
+}
+
+/*
+ * Enter a dio into the hash.  If the pbase already exists in the hash,
+ * the xio in the hash is referenced and returned.  If dio is sucessfully
+ * entered into the hash, NULL is returned.
+ */
+static hammer2_io_t *
+hammer2_io_hash_enter(hammer2_dev_t *hmp, hammer2_io_t *dio, uint64_t *refsp)
+{
+	hammer2_io_hash_t *hash;
+	hammer2_io_t *xio, **xiop;
+	uint64_t refs;
+
+	hammer2_mtx_assert_ex(&hmp->iohash_lock);
+	hammer2_assert_io_refs(dio);
+
+	if (refsp)
+		*refsp = 0;
+
+	hash = hammer2_io_hashv(hmp, dio->pbase);
+	//hammer2_spin_ex(&hash->spin);
+	for (xiop = &hash->base; (xio = *xiop) != NULL; xiop = &xio->next) {
+		if (xio->pbase == dio->pbase) {
+			refs = xio->refs++;
+			if ((refs & HAMMER2_DIO_MASK) == 0)
+				atomic_add_int(&xio->hmp->iofree_count, -1);
+			if (refsp)
+				*refsp = refs;
+			goto done;
+		}
+	}
+	dio->next = NULL;
+	*xiop = dio;
+done:
+	//hammer2_spin_unex(&hash->spin);
+
+	return (xio);
+}
+
+/*
+ * Clean out a limited number of freeable DIOs.
+ */
+static void
+hammer2_io_hash_cleanup(hammer2_dev_t *hmp, int dio_limit)
+{
+	hammer2_io_hash_t *hash;
+	hammer2_io_t *dio, **diop, *cleanbase, **cleanapp;
+	int count, maxscan, act, i;
+
+	hammer2_mtx_assert_ex(&hmp->iohash_lock);
+
+	count = hmp->iofree_count - dio_limit + 32;
+	if (count <= 0)
+		return;
+
+	cleanbase = NULL;
+	cleanapp = &cleanbase;
+	i = hmp->io_iterator++;
+	maxscan = HAMMER2_IOHASH_SIZE;
+
+	while (count > 0 && maxscan--) {
+		hash = &hmp->iohash[i & HAMMER2_IOHASH_MASK];
+		//hammer2_spin_ex(&hash->spin);
+		diop = &hash->base;
+		while ((dio = *diop) != NULL) {
+			if ((dio->refs & HAMMER2_DIO_MASK) != 0) {
+				diop = &dio->next;
+				continue;
+			}
+			if (dio->act > 0) {
+				act = dio->act - (getticks() - dio->ticks) / hz - 1;
+				dio->act = (act < 0) ? 0 : act;
+			}
+			if (dio->act) {
+				diop = &dio->next;
+				continue;
+			}
+			KKASSERT(dio->bp == NULL);
+			*diop = dio->next;
+			dio->next = NULL;
+			*cleanapp = dio;
+			cleanapp = &dio->next;
+			--count;
+			/* diop remains unchanged */
+			atomic_add_int(&hammer2_count_dio_allocated, -1);
+			atomic_add_int(&hmp->iofree_count, -1);
+		}
+		//hammer2_spin_unex(&hash->spin);
+		i = hmp->io_iterator++;
+	}
+
+	/* Get rid of dios on clean list without holding any locks. */
+	while ((dio = cleanbase) != NULL) {
+		cleanbase = dio->next;
+		dio->next = NULL;
+		KKASSERT(dio->bp == NULL &&
+		    (dio->refs & HAMMER2_DIO_MASK) == 0);
+		if (dio->refs & HAMMER2_DIO_DIRTY)
+			hprintf("dirty buffer %016jx/%d\n",
+			    dio->pbase, dio->psize);
+		hammer2_mtx_destroy(&dio->lock);
+		hfree(dio, M_HAMMER2, sizeof(*dio));
+	}
+}
+
+/*
+ * Destroy all DIOs associated with the media.
+ */
+void
+hammer2_io_hash_cleanup_all(hammer2_dev_t *hmp)
+{
+	hammer2_io_hash_t *hash;
+	hammer2_io_t *dio;
+	int i;
+
+	hammer2_mtx_assert_ex(&hmp->iohash_lock);
+
+	for (i = 0; i < HAMMER2_IOHASH_SIZE; ++i) {
+		hash = &hmp->iohash[i];
+		while ((dio = hash->base) != NULL) {
+			hash->base = dio->next;
+			dio->next = NULL;
+			KKASSERT(dio->bp == NULL &&
+			    (dio->refs & HAMMER2_DIO_MASK) == 0);
+			if (dio->refs & HAMMER2_DIO_DIRTY)
+				hprintf("dirty buffer %016jx/%d\n",
+				    dio->pbase, dio->psize);
+			hammer2_mtx_destroy(&dio->lock);
+			hfree(dio, M_HAMMER2, sizeof(*dio));
+			atomic_add_int(&hammer2_count_dio_allocated, -1);
+			atomic_add_int(&hmp->iofree_count, -1);
+		}
+	}
+}
+
 #define HAMMER2_DEDUP_FRAG	(HAMMER2_PBUFSIZE / 64)
 #define HAMMER2_DEDUP_FRAGRADIX	(HAMMER2_PBUFRADIX - 6)
 
@@ -550,11 +666,11 @@ hammer2_io_dedup_set(hammer2_dev_t *hmp, hammer2_blockref_t *bref)
 	uint64_t mask;
 	int lsize;
 
-	hammer2_mtx_ex(&hmp->iotree_lock);
+	hammer2_mtx_ex(&hmp->iohash_lock);
 	dio = hammer2_io_alloc(hmp, bref->data_off, bref->type, 1);
 	KKASSERT(dio);
 	hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
-	hammer2_mtx_unlock(&hmp->iotree_lock);
+	hammer2_mtx_unlock(&hmp->iohash_lock);
 
 	if ((int)(bref->data_off & HAMMER2_OFF_MASK_RADIX))
 		lsize = 1 << (int)(bref->data_off & HAMMER2_OFF_MASK_RADIX);
@@ -587,11 +703,11 @@ hammer2_io_dedup_delete(hammer2_dev_t *hmp, uint8_t btype,
 	if (btype != HAMMER2_BREF_TYPE_DATA)
 		return;
 
-	hammer2_mtx_ex(&hmp->iotree_lock);
+	hammer2_mtx_ex(&hmp->iohash_lock);
 	dio = hammer2_io_alloc(hmp, data_off, btype, 0);
 	if (dio) {
 		hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
-		hammer2_mtx_unlock(&hmp->iotree_lock);
+		hammer2_mtx_unlock(&hmp->iohash_lock);
 
 		if (data_off < (hammer2_off_t)dio->pbase ||
 		    (data_off & ~HAMMER2_OFF_MASK_RADIX) +
@@ -607,7 +723,7 @@ hammer2_io_dedup_delete(hammer2_dev_t *hmp, uint8_t btype,
 		hammer2_mtx_unlock(&dio->lock);
 		hammer2_io_putblk(&dio);
 	} else {
-		hammer2_mtx_unlock(&hmp->iotree_lock);
+		hammer2_mtx_unlock(&hmp->iohash_lock);
 	}
 }
 
@@ -621,11 +737,11 @@ hammer2_io_dedup_assert(hammer2_dev_t *hmp, hammer2_off_t data_off,
 {
 	hammer2_io_t *dio;
 
-	hammer2_mtx_ex(&hmp->iotree_lock);
+	hammer2_mtx_ex(&hmp->iohash_lock);
 	dio = hammer2_io_alloc(hmp, data_off, HAMMER2_BREF_TYPE_DATA, 0);
 	if (dio) {
 		hammer2_assert_io_refs(dio); /* dio locked + refs > 0 */
-		hammer2_mtx_unlock(&hmp->iotree_lock);
+		hammer2_mtx_unlock(&hmp->iohash_lock);
 
 		KASSERTMSG((dio->dedup_alloc &
 		    hammer2_dedup_mask(dio, data_off, bytes)) == 0,
@@ -637,6 +753,6 @@ hammer2_io_dedup_assert(hammer2_dev_t *hmp, hammer2_off_t data_off,
 		hammer2_mtx_unlock(&dio->lock);
 		hammer2_io_putblk(&dio);
 	} else {
-		hammer2_mtx_unlock(&hmp->iotree_lock);
+		hammer2_mtx_unlock(&hmp->iohash_lock);
 	}
 }

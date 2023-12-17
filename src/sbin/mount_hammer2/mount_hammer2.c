@@ -59,18 +59,20 @@ main(int argc, char **argv)
 	struct hammer2_mount_info args;
 	char canon_dev[MAXPATHLEN], canon_dir[MAXPATHLEN];
 	const char *errcause;
-	char *val, *p;
-	int ch, mntflags;
+	char *val, *p, **argp;
+	int ch, mntflags = 0, initflags = 0;
 
 	setprogname(argv[0]);
 
 	memset(&args, 0, sizeof(args));
-	mntflags = 0;
 	optind = optreset = 1; /* Reset for parse of new argv. */
-	while ((ch = getopt(argc, argv, "o:")) != -1) {
+	while ((ch = getopt(argc, argv, "o:u")) != -1) {
 		switch (ch) {
 		case 'o':
 			getmntopts(optarg, mopts, &mntflags);
+			break;
+		case 'u':
+			initflags |= MNT_UPDATE;
 			break;
 		case '?':
 		default:
@@ -80,14 +82,24 @@ main(int argc, char **argv)
 	}
 	argc -= optind;
 	argv += optind;
+	argp = argv;
+	mntflags |= initflags;
+
+	/* Only the mount point need be specified in update mode. */
+	if (initflags & MNT_UPDATE) {
+		if (argc != 1) {
+			usage("missing parameter (node)");
+			/* not reached */
+		}
+		goto ignore_special;
+	}
 
 	if (argc != 2) {
 		usage("missing parameter(s) (special[@label] node)");
 		/* not reached */
 	}
 
-	strlcpy(canon_dev, argv[0], MAXPATHLEN);
-	strlcpy(canon_dir, argv[1], MAXPATHLEN);
+	strlcpy(canon_dev, *argp, MAXPATHLEN);
 
 	/* Automatically add @DATA if no label specified. */
 	if (strchr(canon_dev, '@') == NULL) {
@@ -106,7 +118,10 @@ main(int argc, char **argv)
 		free(val);
 	}
 
-	args.fspec = strcmp(argv[0], "") ? canon_dev : NULL;
+	args.fspec = strcmp(*argp, "") ? canon_dev : NULL;
+	argp++;
+ignore_special:
+	strlcpy(canon_dir, *argp, MAXPATHLEN);
 
 #define DEFAULT_ROOTUID	-2
 	args.export_info.ex_root = DEFAULT_ROOTUID;
@@ -149,6 +164,7 @@ usage(const char *ctl, ...)
 	fprintf(stderr, "\n");
 	fprintf(stderr, " mount_hammer2 [-o options] special[@label] node\n");
 	fprintf(stderr, " mount_hammer2 [-o options] @label node\n");
+	fprintf(stderr, " mount_hammer2 -u [-o options] node\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "options:\n"
 			" <standard_mount_options>\n"

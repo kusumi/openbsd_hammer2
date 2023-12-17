@@ -412,22 +412,3 @@ hammer2_breftype_to_str(uint8_t type)
 		return ("unknown");
 	}
 }
-
-char *
-kstrdup(const char *str)
-{
-	size_t len;
-	char *copy;
-
-	len = strlen(str) + 1;
-	copy = malloc(len, M_TEMP, M_WAITOK | M_ZERO);
-	bcopy(str, copy, len);
-
-	return (copy);
-}
-
-void
-kstrfree(char *str)
-{
-	free(str, M_TEMP, 0);
-}

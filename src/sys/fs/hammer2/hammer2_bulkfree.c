@@ -285,7 +285,7 @@ hammer2_bulkfree_scan(hammer2_chain_t *parent,
 				 * placed after each other in order to maintain
 				 * our depth-first processing.
 				 */
-				save = malloc(sizeof(*save), M_HAMMER2,
+				save = hmalloc(sizeof(*save), M_HAMMER2,
 				    M_WAITOK | M_ZERO);
 				save->chain = chain;
 				hammer2_chain_ref(chain);
@@ -351,7 +351,7 @@ hammer2_bulkfree_scan(hammer2_chain_t *parent,
 			rup_error |= hammer2_bulkfree_scan(save->chain, func,
 			    info);
 			hammer2_chain_drop(save->chain);
-			free(save, M_HAMMER2, 0);
+			hfree(save, M_HAMMER2, sizeof(*save));
 			info->pri = savepri;
 		}
 	}
@@ -472,8 +472,8 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 	    ~(size_t)(HAMMER2_FREEMAP_LEVELN_PSIZE - 1);
 
 	cbinfo.hmp = hmp;
-	cbinfo.bmap = malloc(size, M_HAMMER2, M_WAITOK | M_ZERO);
-	cbinfo.dedup = malloc(sizeof(*cbinfo.dedup) * HAMMER2_DEDUP_HEUR_SIZE,
+	cbinfo.bmap = hmalloc(size, M_HAMMER2, M_WAITOK | M_ZERO);
+	cbinfo.dedup = hmalloc(sizeof(*cbinfo.dedup) * HAMMER2_DEDUP_HEUR_SIZE,
 	    M_HAMMER2, M_WAITOK | M_ZERO);
 
 	hprintf("bulkfree buffer %jdMB\n", (intmax_t)size / (1024 * 1024));
@@ -561,13 +561,13 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 			error |= hammer2_bulkfree_scan(save->chain,
 			    h2_bulkfree_callback, &cbinfo);
 			hammer2_chain_drop(save->chain);
-			free(save, M_HAMMER2, 0);
+			hfree(save, M_HAMMER2, sizeof(*save));
 		}
 		while (save) {
 			TAILQ_REMOVE(&cbinfo.list, save, entry);
 			--cbinfo.list_count;
 			hammer2_chain_drop(save->chain);
-			free(save, M_HAMMER2, 0);
+			hfree(save, M_HAMMER2, sizeof(*save));
 			save = TAILQ_FIRST(&cbinfo.list);
 		}
 		cbinfo.backout = NULL;
@@ -607,8 +607,9 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 		cbinfo.sbase = cbinfo.sstop;
 		cbinfo.adj_free = 0;
 	}
-	free(cbinfo.bmap, M_HAMMER2, 0);
-	free(cbinfo.dedup, M_HAMMER2, 0);
+	hfree(cbinfo.bmap, M_HAMMER2, size);
+	hfree(cbinfo.dedup, M_HAMMER2,
+	    sizeof(*cbinfo.dedup) * HAMMER2_DEDUP_HEUR_SIZE);
 	cbinfo.dedup = NULL;
 
 	bfi->sstop = cbinfo.sbase;
@@ -681,7 +682,6 @@ h2_bulkfree_callback(hammer2_bulkfree_info_t *cbinfo, hammer2_blockref_t *bref)
 	uint16_t class;
 	size_t bytes;
 	int radix, dticks, bindex, sig;
-	const int hammer2_bulkfree_tps = 5000; /* originally sysctl */
 
 	/* Check for signal and allow yield to userland during scan. */
 	sig = hammer2_signal_check();

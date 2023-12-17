@@ -49,7 +49,6 @@ static hammer2_chain_t *hammer2_combined_find(hammer2_chain_t *,
     hammer2_blockref_t *, int, hammer2_key_t *, hammer2_key_t, hammer2_key_t,
     hammer2_blockref_t **);
 static hammer2_chain_t *hammer2_chain_lastdrop(hammer2_chain_t *, int);
-static void hammer2_chain_lru_flush(hammer2_pfs_t *);
 static void hammer2_chain_load_data(hammer2_chain_t *);
 static int hammer2_chain_testcheck(const hammer2_chain_t *, void *);
 
@@ -160,8 +159,8 @@ hammer2_chain_alloc(hammer2_dev_t *hmp, hammer2_pfs_t *pmp,
 	case HAMMER2_BREF_TYPE_FREEMAP_LEAF:
 	case HAMMER2_BREF_TYPE_FREEMAP:
 	case HAMMER2_BREF_TYPE_VOLUME:
-		chain = malloc(sizeof(*chain), M_HAMMER2, M_WAITOK | M_ZERO);
-		atomic_add_int(&hammer2_chain_allocs, 1);
+		chain = hmalloc(sizeof(*chain), M_HAMMER2, M_WAITOK | M_ZERO);
+		atomic_add_int(&hammer2_count_chain_allocated, 1);
 		break;
 	case HAMMER2_BREF_TYPE_EMPTY:
 	default:
@@ -208,18 +207,14 @@ hammer2_chain_init(hammer2_chain_t *chain)
 
 /*
  * Add a reference to a chain element, preventing its destruction.
+ * Undone via hammer2_chain_drop().
  * Can be called with spinlock held.
  */
 void
 hammer2_chain_ref(hammer2_chain_t *chain)
 {
 	if (atomic_fetchadd_int(&chain->refs, 1) == 0) {
-		/*
-		 * Just flag that the chain was used and should be recycled
-		 * on the LRU if it encounters it later.
-		 */
-		if (chain->flags & HAMMER2_CHAIN_ONLRU)
-			atomic_set_int(&chain->flags, HAMMER2_CHAIN_LRUHINT);
+		/* NOP */
 	}
 }
 
@@ -403,7 +398,6 @@ hammer2_chain_rehold(hammer2_chain_t *chain)
 static hammer2_chain_t *
 hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 {
-	hammer2_pfs_t *pmp;
 	hammer2_chain_t *parent, *rdrop;
 
 	hammer2_mtx_assert_ex(&chain->lock);
@@ -425,8 +419,6 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 		 *
 		 * If the chain has a parent the MODIFIED bit prevents
 		 * scrapping.
-		 *
-		 * Chains with UPDATE/MODIFIED are *not* put on the LRU list!
 		 */
 		if (chain->flags &
 		    (HAMMER2_CHAIN_UPDATE | HAMMER2_CHAIN_MODIFIED)) {
@@ -493,7 +485,7 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 		 */
 		if (chain->flags & HAMMER2_CHAIN_MODIFIED) {
 			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_MODIFIED);
-			atomic_add_long(&hammer2_count_modified_chains, -1);
+			atomic_add_int(&hammer2_count_chain_modified, -1);
 		}
 		/* spinlock still held */
 	}
@@ -506,8 +498,6 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 	 *
 	 * Retry (return chain) if we fail to transition the refs to 0, else
 	 * return NULL indication nothing more to do.
-	 *
-	 * Chains with children are NOT put on the LRU list.
 	 */
 	if (chain->core.chain_count) {
 		if (atomic_cmpset_int(&chain->refs, 1, 0)) {
@@ -530,7 +520,6 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 	 * remaining possible accessors that might bump chain's refs before
 	 * we can safely drop chain's refs with intent to free the chain.
 	 */
-	pmp = chain->pmp;	/* can be NULL */
 	rdrop = NULL;
 	parent = chain->parent;
 
@@ -539,89 +528,6 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 	 *	    will be acquired and released in the code below.  We
 	 *	    cannot be making fancy procedure calls!
 	 */
-
-	/*
-	 * We can cache the chain if it is associated with a pmp
-	 * and not flagged as being destroyed or requesting a full
-	 * release.  In this situation the chain is not removed
-	 * from its parent, i.e. it can still be looked up.
-	 *
-	 * We intentionally do not cache DATA chains because these
-	 * were likely used to load data into the logical buffer cache
-	 * and will not be accessed again for some time.
-	 */
-	if ((chain->flags &
-	    (HAMMER2_CHAIN_DESTROY | HAMMER2_CHAIN_RELEASE)) == 0 &&
-	    chain->pmp && chain->bref.type != HAMMER2_BREF_TYPE_DATA) {
-		if (parent)
-			hammer2_spin_ex(&parent->core.spin);
-		if (atomic_cmpset_int(&chain->refs, 1, 0) == 0) {
-			/*
-			 * 1->0 transition failed, retry.  Do not drop
-			 * the chain's data yet!
-			 */
-			if (parent)
-				hammer2_spin_unex(&parent->core.spin);
-			hammer2_spin_unex(&chain->core.spin);
-			hammer2_mtx_unlock(&chain->lock);
-			return (chain);
-		}
-
-		/* Success. */
-		hammer2_chain_assert_no_data(chain);
-
-		/*
-		 * Make sure we are on the LRU list, clean up excessive
-		 * LRU entries.  We can only really drop one but there might
-		 * be other entries that we can remove from the lru_list
-		 * without dropping.
-		 *
-		 * NOTE: HAMMER2_CHAIN_ONLRU may only be safely set when
-		 *	 chain->core.spin AND pmp->lru_spin are held, but
-		 *	 can be safely cleared only holding pmp->lru_spin.
-		 */
-		if ((chain->flags & HAMMER2_CHAIN_ONLRU) == 0) {
-			hammer2_spin_ex(&pmp->lru_spin);
-			if ((chain->flags & HAMMER2_CHAIN_ONLRU) == 0) {
-				atomic_set_int(&chain->flags,
-				    HAMMER2_CHAIN_ONLRU);
-				TAILQ_INSERT_TAIL(&pmp->lru_list, chain, entry);
-				atomic_add_int(&pmp->lru_count, 1);
-			}
-			if (pmp->lru_count < HAMMER2_LRU_LIMIT)
-				depth = 1;	/* Disable lru_list flush. */
-			hammer2_spin_unex(&pmp->lru_spin);
-		} else {
-			/* Disable lru_list flush. */
-			depth = 1;
-		}
-
-		if (parent) {
-			hammer2_spin_unex(&parent->core.spin);
-			parent = NULL; /* safety */
-		}
-		hammer2_spin_unex(&chain->core.spin);
-		hammer2_mtx_unlock(&chain->lock);
-
-		/*
-		 * lru_list hysteresis (see above for depth overrides).
-		 * Note that depth also prevents excessive lastdrop recursion.
-		 */
-		if (depth == 0)
-			hammer2_chain_lru_flush(pmp);
-		return (NULL);
-	}
-
-	/* Make sure we are not on the LRU list. */
-	if (chain->flags & HAMMER2_CHAIN_ONLRU) {
-		hammer2_spin_ex(&pmp->lru_spin);
-		if (chain->flags & HAMMER2_CHAIN_ONLRU) {
-			atomic_add_int(&pmp->lru_count, -1);
-			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_ONLRU);
-			TAILQ_REMOVE(&pmp->lru_list, chain, entry);
-		}
-		hammer2_spin_unex(&pmp->lru_spin);
-	}
 
 	/*
 	 * Spinlock the parent and try to drop the last ref on chain.
@@ -719,81 +625,12 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 		hammer2_lkc_destroy(&chain->inp_cv);
 		hammer2_spin_destroy(&chain->core.spin);
 		chain->hmp = NULL;
-		free(chain, M_HAMMER2, 0);
-		atomic_add_int(&hammer2_chain_allocs, -1);
+		hfree(chain, M_HAMMER2, sizeof(*chain));
+		atomic_add_int(&hammer2_count_chain_allocated, -1);
 	}
 
 	/* Possible chaining loop when parent re-drop needed. */
 	return (rdrop);
-}
-
-/*
- * Heuristical flush of the LRU, try to reduce the number of entries
- * on the LRU to (HAMMER2_LRU_LIMIT * 2 / 3).  This procedure is called
- * only when lru_count exceeds HAMMER2_LRU_LIMIT.
- */
-static void
-hammer2_chain_lru_flush(hammer2_pfs_t *pmp)
-{
-	hammer2_chain_t *chain;
-	unsigned int refs;
-again:
-	chain = NULL;
-	hammer2_spin_ex(&pmp->lru_spin);
-	while (pmp->lru_count > HAMMER2_LRU_LIMIT * 2 / 3) {
-		/*
-		 * Pick a chain off the lru_list, just recycle it quickly
-		 * if LRUHINT is set (the chain was ref'd but left on
-		 * the lru_list, so cycle to the end).
-		 */
-		chain = TAILQ_FIRST(&pmp->lru_list);
-		TAILQ_REMOVE(&pmp->lru_list, chain, entry);
-
-		if (chain->flags & HAMMER2_CHAIN_LRUHINT) {
-			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_LRUHINT);
-			TAILQ_INSERT_TAIL(&pmp->lru_list, chain, entry);
-			chain = NULL;
-			continue;
-		}
-
-		/*
-		 * Ok, we are off the LRU.  We must adjust refs before we
-		 * can safely clear the ONLRU flag.
-		 */
-		atomic_add_int(&pmp->lru_count, -1);
-		if (atomic_cmpset_int(&chain->refs, 0, 1)) {
-			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_ONLRU);
-			atomic_set_int(&chain->flags, HAMMER2_CHAIN_RELEASE);
-			break;
-		}
-		atomic_clear_int(&chain->flags, HAMMER2_CHAIN_ONLRU);
-		chain = NULL;
-	}
-	hammer2_spin_unex(&pmp->lru_spin);
-	if (chain == NULL)
-		return;
-
-	/*
-	 * If we picked a chain off the lru list we may be able to lastdrop
-	 * it.  Use a depth of 1 to prevent excessive lastdrop recursion.
-	 */
-	while (chain) {
-		refs = chain->refs;
-		cpu_ccfence();
-		KKASSERT(refs > 0);
-
-		if (refs == 1) {
-			if (hammer2_mtx_ex_try(&chain->lock) == 0)
-				chain = hammer2_chain_lastdrop(chain, 1);
-			/* Retry the same chain, or chain from lastdrop. */
-		} else {
-			if (atomic_cmpset_int(&chain->refs, refs, refs - 1))
-				break;
-			/* Retry the same chain. */
-		}
-		cpu_pause();
-	}
-	goto again;
 }
 
 /*
@@ -1424,7 +1261,7 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 	 */
 	if ((chain->flags & HAMMER2_CHAIN_MODIFIED) == 0) {
 		/* Must set modified bit. */
-		atomic_add_long(&hammer2_count_modified_chains, 1);
+		atomic_add_int(&hammer2_count_chain_modified, 1);
 		atomic_set_int(&chain->flags, HAMMER2_CHAIN_MODIFIED);
 		setmodified = 1;
 
@@ -1543,7 +1380,7 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 				chain->error = 0;
 				atomic_clear_int(&chain->flags,
 				    HAMMER2_CHAIN_MODIFIED);
-				atomic_add_long(&hammer2_count_modified_chains,
+				atomic_add_int(&hammer2_count_chain_modified,
 				    -1);
 				hammer2_freemap_adjust(hmp, &chain->bref,
 				    HAMMER2_FREEMAP_DORECOVER);
@@ -1577,11 +1414,13 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 					    ~HAMMER2_BREF_FLAG_EMERG_MIP;
 				}
 			}
-			debug_hprintf("%s %s chain %016jx %016jx/%d\n",
-			    dedup_off ? "dedup" : "alloc",
-			    hammer2_breftype_to_str(chain->bref.type),
-			    (intmax_t)chain->bref.data_off,
-			    (intmax_t)chain->bref.key, chain->bref.keybits);
+			if (dedup_off)
+				debug_hprintf("%s %s chain %016jx %016jx/%d\n",
+				    dedup_off ? "dedup" : "alloc",
+				    hammer2_breftype_to_str(chain->bref.type),
+				    (intmax_t)chain->bref.data_off,
+				    (intmax_t)chain->bref.key,
+				    chain->bref.keybits);
 		}
 	}
 
@@ -1592,7 +1431,7 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 	if (error) {
 		if (setmodified) {
 			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_MODIFIED);
-			atomic_add_long(&hammer2_count_modified_chains, -1);
+			atomic_add_int(&hammer2_count_chain_modified, -1);
 		}
 		if (setupdate)
 			atomic_clear_int(&chain->flags, HAMMER2_CHAIN_UPDATE);
@@ -5025,7 +4864,7 @@ hammer2_chain_bulksnap(hammer2_dev_t *hmp)
 	hammer2_chain_t *copy;
 
 	copy = hammer2_chain_alloc(hmp, hmp->spmp, &hmp->vchain.bref);
-	copy->data = malloc(sizeof(copy->data->voldata), M_HAMMER2,
+	copy->data = hmalloc(sizeof(copy->data->voldata), M_HAMMER2,
 	    M_WAITOK | M_ZERO);
 	hammer2_voldata_lock(hmp);
 	copy->data->voldata = hmp->volsync;
@@ -5040,7 +4879,7 @@ hammer2_chain_bulkdrop(hammer2_chain_t *copy)
 	KKASSERT(copy->bref.type == HAMMER2_BREF_TYPE_VOLUME);
 	KKASSERT(copy->data);
 
-	free(copy->data, M_HAMMER2, 0);
+	hfree(copy->data, M_HAMMER2, sizeof(copy->data->voldata));
 	copy->data = NULL;
 	hammer2_chain_drop(copy);
 }

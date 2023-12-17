@@ -27,7 +27,7 @@
 .\" OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd September 18, 2023
+.Dd December 11, 2023
 .Dt MOUNT_HAMMER2 8
 .Os
 .Sh NAME
@@ -41,6 +41,10 @@
 .Nm
 .Op Fl o Ar options
 .Cm @ Ns Ar label
+.Ar node
+.Nm
+.Fl u
+.Op Fl o Ar options
 .Ar node
 .Sh DESCRIPTION
 The
@@ -67,10 +71,10 @@ If there are multiple mounts with the same
 .Ar label ,
 the first one mounted takes precedence over others.
 .Pp
-.Nm HAMMER2
-file system on
-.Ox
-currently does not fully support write.
+Default value for
+.Ar label
+is "DATA".
+.Pp
 .Nm HAMMER2
 file system only supports host-endian.
 .Pp
@@ -83,7 +87,12 @@ flag followed by a comma separated string of options.
 See the
 .Xr mount 8
 man page for possible options and their meanings.
+.It Fl u
+Update the mount point.
+This is used to upgrade a mount to read-write.
 .El
+.Sh EXIT STATUS
+.Ex -std
 .Sh SEE ALSO
 .Xr hammer2 8 ,
 .Xr newfs_hammer2 8
