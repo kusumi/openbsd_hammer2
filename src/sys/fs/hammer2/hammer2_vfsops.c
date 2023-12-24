@@ -373,8 +373,8 @@ hammer2_pfsfree(hammer2_pfs_t *pmp)
 				chains_still_present = 1;
 		}
 		KASSERTMSG(iroot->refs == 1,
-		    "iroot inum %016jx refs %d not 1",
-		    (intmax_t)iroot->meta.inum, iroot->refs);
+		    "iroot inum %016llx refs %d not 1",
+		    (long long)iroot->meta.inum, iroot->refs);
 		hammer2_inode_drop(iroot);
 		pmp->iroot = NULL;
 	}
@@ -1353,8 +1353,8 @@ hammer2_recovery(hammer2_dev_t *hmp)
 	if (sync_tid >= mirror_tid)
 		debug_hprintf("no recovery needed\n");
 	else
-		hprintf("freemap recovery %016jx-%016jx\n",
-		    sync_tid + 1, mirror_tid);
+		hprintf("freemap recovery %016llx-%016llx\n",
+		    (long long)sync_tid + 1, (long long)mirror_tid);
 
 	TAILQ_INIT(&info.list);
 	info.depth = 0;
@@ -1757,8 +1757,8 @@ restart:
 				 */
 				vp = NULL;
 				dorestart |= 1;
-				debug_hprintf("inum %016jx vn_lock failed\n",
-				    (intmax_t)ip->meta.inum);
+				debug_hprintf("inum %016llx vn_lock failed\n",
+				    (long long)ip->meta.inum);
 				hammer2_inode_delayed_sideq(ip);
 
 				hammer2_mtx_unlock(&ip->lock);
@@ -1808,12 +1808,12 @@ restart:
 		 * update the parent.
 		 */
 		if (ip->flags & HAMMER2_INODE_DELETING) {
-			debug_hprintf("inum %016jx destroy\n",
-			    (intmax_t)ip->meta.inum);
+			debug_hprintf("inum %016llx destroy\n",
+			    (long long)ip->meta.inum);
 			hammer2_inode_chain_des(ip);
 		} else if (ip->flags & HAMMER2_INODE_CREATING) {
-			debug_hprintf("inum %016jx insert\n",
-			    (intmax_t)ip->meta.inum);
+			debug_hprintf("inum %016llx insert\n",
+			    (long long)ip->meta.inum);
 			hammer2_inode_chain_ins(ip);
 		}
 
@@ -1832,8 +1832,8 @@ restart:
 		 * XXX at the moment this will likely result in a double-flush
 		 * of the iroot chain.
 		 */
-		debug_hprintf("inum %016jx pinum %016jx chain-sync\n",
-		    (intmax_t)ip->meta.inum, (intmax_t)ip->meta.iparent);
+		debug_hprintf("inum %016llx pinum %016llx chain-sync\n",
+		    (long long)ip->meta.inum, (long long)ip->meta.iparent);
 		hammer2_inode_chain_sync(ip);
 
 		if (ip == pmp->iroot)
@@ -1994,8 +1994,9 @@ hammer2_root(struct mount *mp, struct vnode **vpp)
 				pmp->inode_tid = HAMMER2_INODE_START;
 			pmp->modify_tid =
 			    xop->head.cluster.focus->bref.modify_tid + 1;
-			debug_hprintf("PFS nextino %016jx mod %016jx\n",
-			    (intmax_t)pmp->inode_tid, (intmax_t)pmp->modify_tid);
+			debug_hprintf("PFS nextino %016llx mod %016llx\n",
+			    (long long)pmp->inode_tid,
+			    (long long)pmp->modify_tid);
 
 			wakeup(&pmp->iroot);
 			hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);

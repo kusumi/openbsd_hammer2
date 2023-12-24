@@ -173,7 +173,8 @@ hammer2_xop_setname_inum(hammer2_xop_head_t *xop, hammer2_key_t inum)
 
 	xop->name1 = hmalloc(name_len + 1, M_HAMMER2, M_WAITOK | M_ZERO);
 	xop->name1_len = name_len;
-	snprintf(xop->name1, name_len + 1, "0x%016jx", (intmax_t)inum);
+	/* OpenBSD printf(9) variants don't support "%j..." */
+	snprintf(xop->name1, name_len + 1, "0x%016llx", (long long)inum);
 
 	return (name_len);
 }
@@ -293,13 +294,13 @@ xop_storage_func(hammer2_xop_head_t *xop, hammer2_inode_t *ip, void *scratch,
     int i)
 {
 #ifdef XOP_ADMIN_DEBUG
-	hprintf("xop_%s inum %016jx index %d\n",
-	    xop->desc->id, (intmax_t)ip->meta.inum, i);
+	hprintf("xop_%s inum %016llx index %d\n",
+	    xop->desc->id, (long long)ip->meta.inum, i);
 #endif
 	xop->desc->storage_func((hammer2_xop_t *)xop, scratch, i);
 #ifdef XOP_ADMIN_DEBUG
-	hprintf("xop_%s inum %016jx index %d done\n",
-	    xop->desc->id, (intmax_t)ip->meta.inum, i);
+	hprintf("xop_%s inum %016llx index %d done\n",
+	    xop->desc->id, (long long)ip->meta.inum, i);
 #endif
 }
 #else

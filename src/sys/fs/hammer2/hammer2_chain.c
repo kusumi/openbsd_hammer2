@@ -90,9 +90,9 @@ hammer2_chain_assert_no_data(const hammer2_chain_t *chain)
 	if (chain->bref.type != HAMMER2_BREF_TYPE_VOLUME &&
 	    chain->bref.type != HAMMER2_BREF_TYPE_FREEMAP &&
 	    chain->data)
-		hpanic("%s chain %016jx/%d still has data",
+		hpanic("%s chain %016llx/%d still has data",
 		    hammer2_breftype_to_str(chain->bref.type),
-		    (intmax_t)chain->bref.key, chain->bref.keybits);
+		    (long long)chain->bref.key, chain->bref.keybits);
 }
 
 /*
@@ -261,8 +261,8 @@ hammer2_chain_insert(hammer2_chain_t *parent, hammer2_chain_t *chain, int flags,
 
 	/* Insert chain. */
 	xchain = RB_INSERT(hammer2_chain_tree, &parent->core.rbtree, chain);
-	KASSERTMSG(xchain == NULL, "collision %016jx/%d",
-	    (intmax_t)chain->bref.key, chain->bref.keybits);
+	KASSERTMSG(xchain == NULL, "collision %016llx/%d",
+	    (long long)chain->bref.key, chain->bref.keybits);
 
 	atomic_set_int(&chain->flags, HAMMER2_CHAIN_ONRBTREE);
 	chain->parent = parent;
@@ -651,9 +651,9 @@ hammer2_chain_drop_data(hammer2_chain_t *chain)
 			break;
 		default:
 			if (chain->data != NULL)
-				hpanic("%s chain %016jx/%d data not NULL",
+				hpanic("%s chain %016llx/%d data not NULL",
 				    hammer2_breftype_to_str(chain->bref.type),
-				    (intmax_t)chain->bref.key,
+				    (long long)chain->bref.key,
 				    chain->bref.keybits);
 			KKASSERT(chain->data == NULL);
 			break;
@@ -849,13 +849,11 @@ again:
 	if (chain->data)
 		goto done;
 
-	/* We must resolve to a device buffer by issuing I/O. */
-	bref = &chain->bref;
-
 	/*
 	 * The getblk() optimization can only be used on newly created
 	 * elements if the physical block size matches the request.
 	 */
+	bref = &chain->bref;
 	if (chain->flags & HAMMER2_CHAIN_INITIAL)
 		error = hammer2_io_new(hmp, bref->type, bref->data_off,
 		    chain->bytes, &chain->dio);
@@ -863,9 +861,9 @@ again:
 		error = hammer2_io_bread(hmp, bref->type, bref->data_off,
 		    chain->bytes, &chain->dio);
 	if (error) {
-		hprintf("%s blockref I/O error %d at %016jx\n",
+		hprintf("%s blockref I/O error %d at %016llx\n",
 		    hammer2_breftype_to_str(chain->bref.type), error,
-		    (intmax_t)bref->data_off);
+		    (long long)bref->data_off);
 		chain->error = HAMMER2_ERROR_EIO;
 		hammer2_io_bqrelse(&chain->dio);
 		goto done;
@@ -1415,11 +1413,11 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 				}
 			}
 			if (dedup_off)
-				debug_hprintf("%s %s chain %016jx %016jx/%d\n",
+				debug_hprintf("%s %s chain %016llx %016llx/%d\n",
 				    dedup_off ? "dedup" : "alloc",
 				    hammer2_breftype_to_str(chain->bref.type),
-				    (intmax_t)chain->bref.data_off,
-				    (intmax_t)chain->bref.key,
+				    (long long)chain->bref.data_off,
+				    (long long)chain->bref.key,
 				    chain->bref.keybits);
 		}
 	}
@@ -1545,9 +1543,9 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 		 * modify the old buffer's contents and corrupt the filesystem.
 		 */
 		if (error) {
-			hprintf("%s blockref I/O error %d at %016jx\n",
+			hprintf("%s blockref I/O error %d at %016llx\n",
 			    hammer2_breftype_to_str(chain->bref.type), error,
-			    (intmax_t)chain->bref.data_off);
+			    (long long)chain->bref.data_off);
 			chain->error = HAMMER2_ERROR_EIO;
 			hammer2_io_brelse(&dio);
 			hammer2_io_brelse(&chain->dio);
@@ -1567,9 +1565,9 @@ hammer2_chain_modify(hammer2_chain_t *chain, hammer2_tid_t mtid,
 			 * We have a problem.  We were asked to COW but
 			 * we don't have any data to COW with!
 			 */
-			hpanic("no CoW data for %s chain %016jx/%d",
+			hpanic("no CoW data for %s chain %016llx/%d",
 			    hammer2_breftype_to_str(chain->bref.type),
-			    (intmax_t)chain->bref.key, chain->bref.keybits);
+			    (long long)chain->bref.key, chain->bref.keybits);
 		}
 
 		/*
@@ -2311,9 +2309,9 @@ again:
 	 *	 (they just use the spinlock on the core).
 	 */
 	if (chain->flags & HAMMER2_CHAIN_DELETED) {
-		hprintf("skip deleted %s chain %016jx/%d\n",
+		hprintf("skip deleted %s chain %016llx/%d\n",
 		    hammer2_breftype_to_str(chain->bref.type),
-		    (intmax_t)chain->bref.key, chain->bref.keybits);
+		    (long long)chain->bref.key, chain->bref.keybits);
 		hammer2_chain_unlock(chain);
 		hammer2_chain_drop(chain);
 		chain = NULL;
@@ -2823,10 +2821,10 @@ again:
 	case HAMMER2_BREF_TYPE_INODE:
 		if ((parent->data->ipdata.meta.op_flags &
 		    HAMMER2_OPFLAG_DIRECTDATA) != 0)
-			hprintf("parent set for direct-data pkey %016jx "
-			    "ckey %016jx\n",
-			    (intmax_t)parent->bref.key,
-			    (intmax_t)chain->bref.key);
+			hprintf("parent set for direct-data pkey %016llx "
+			    "ckey %016llx\n",
+			    (long long)parent->bref.key,
+			    (long long)chain->bref.key);
 		KKASSERT((parent->data->ipdata.meta.op_flags &
 		    HAMMER2_OPFLAG_DIRECTDATA) == 0);
 		KKASSERT(parent->data != NULL);
@@ -2895,9 +2893,9 @@ again:
 	/* Fall through if parent, or skip to here if no parent. */
 skip:
 	if (chain->flags & HAMMER2_CHAIN_DELETED)
-		hprintf("inserting deleted %s chain %016jx/%d\n",
+		hprintf("inserting deleted %s chain %016llx/%d\n",
 		    hammer2_breftype_to_str(chain->bref.type),
-		    (intmax_t)chain->bref.key, chain->bref.keybits);
+		    (long long)chain->bref.key, chain->bref.keybits);
 
 	/* Link the chain into its parent. */
 	if (chain->parent != NULL)
@@ -3163,18 +3161,7 @@ _hammer2_chain_delete_helper(hammer2_chain_t *parent, hammer2_chain_t *chain,
 			break;
 		}
 
-		/*
-		 * Delete blockmapped chain from its parent.
-		 *
-		 * The parent is not affected by any statistics in chain
-		 * which are pending synchronization.  That is, there is
-		 * nothing to undo in the parent since they have not yet
-		 * been incorporated into the parent.
-		 *
-		 * The parent is affected by statistics stored in inodes.
-		 * Those have already been synchronized, so they must be
-		 * undone.  XXX split update possible w/delete in middle?
-		 */
+		/* Delete blockmapped chain from its parent. */
 		if (base)
 			hammer2_base_delete(parent, base, count, chain, obref);
 
@@ -3185,10 +3172,6 @@ _hammer2_chain_delete_helper(hammer2_chain_t *parent, hammer2_chain_t *chain,
 		 * Chain is not blockmapped but a parent is present.
 		 * Atomically remove the chain from the parent.  There is
 		 * no blockmap entry to remove.
-		 *
-		 * Because chain was associated with a parent but not
-		 * synchronized, the chain's *_count_up fields contain
-		 * inode adjustment statistics which must be undone.
 		 */
 		hammer2_spin_ex(&chain->core.spin);
 		hammer2_spin_ex(&parent->core.spin);
@@ -3291,9 +3274,9 @@ hammer2_chain_create_indirect(hammer2_chain_t *parent, hammer2_key_t create_key,
 	 */
 	*errorp = hammer2_chain_modify(parent, mtid, 0, 0);
 	if (*errorp) {
-		hprintf("%s chain %016jx/%d modify error %08x\n",
+		hprintf("%s chain %016llx/%d modify error %08x\n",
 		    hammer2_breftype_to_str(parent->bref.type),
-		    (intmax_t)parent->bref.key, parent->bref.keybits, *errorp);
+		    (long long)parent->bref.key, parent->bref.keybits, *errorp);
 		return (NULL);
 	}
 	KKASSERT((parent->flags & HAMMER2_CHAIN_INITIAL) == 0);
@@ -3412,9 +3395,9 @@ hammer2_chain_create_indirect(hammer2_chain_t *parent, hammer2_key_t create_key,
 	 */
 	*errorp = hammer2_chain_modify(ichain, mtid, 0, 0);
 	if (*errorp) {
-		hprintf("%s chain %016jx/%d modify error %08x\n",
+		hprintf("%s chain %016llx/%d modify error %08x\n",
 		    hammer2_breftype_to_str(ichain->bref.type),
-		    (intmax_t)ichain->bref.key, ichain->bref.keybits, *errorp);
+		    (long long)ichain->bref.key, ichain->bref.keybits, *errorp);
 		hammer2_chain_unlock(ichain);
 		hammer2_chain_drop(ichain);
 		return (NULL);
@@ -3443,8 +3426,8 @@ hammer2_chain_create_indirect(hammer2_chain_t *parent, hammer2_key_t create_key,
 
 		if (++loops > 100000)
 			hpanic("excessive loops reason %d count %d "
-			    "key_next %016jx",
-			    reason, count, (intmax_t)key_next);
+			    "key_next %016llx",
+			    reason, count, (long long)key_next);
 
 		/*
 		 * NOTE: spinlock stays intact, returned chain (if not NULL)
@@ -3517,11 +3500,6 @@ hammer2_chain_create_indirect(hammer2_chain_t *parent, hammer2_key_t create_key,
 
 		/*
 		 * Shift the chain to the indirect block.
-		 *
-		 * WARNING! No reason for us to load chain data, pass NOSTATS
-		 *	    to prevent delete/insert from trying to access
-		 *	    inode stats (and thus asserting if there is no
-		 *	    chain->data loaded).
 		 *
 		 * WARNING! The (parent, chain) deletion may modify the parent
 		 *	    and invalidate the base pointer.
@@ -3676,16 +3654,16 @@ hammer2_chain_indirect_maintenance(hammer2_chain_t *parent,
 	 */
 	error = hammer2_chain_modify(parent, 0, 0, 0);
 	if (error) {
-		hprintf("%s chain %016jx/%d modify error %08x\n",
+		hprintf("%s chain %016llx/%d modify error %08x\n",
 		    hammer2_breftype_to_str(parent->bref.type),
-		    (intmax_t)parent->bref.key, parent->bref.keybits, error);
+		    (long long)parent->bref.key, parent->bref.keybits, error);
 		return (0);
 	}
 	error = hammer2_chain_modify(chain, chain->bref.modify_tid, 0, 0);
 	if (error) {
-		hprintf("%s chain %016jx/%d modify error %08x\n",
+		hprintf("%s chain %016llx/%d modify error %08x\n",
 		    hammer2_breftype_to_str(chain->bref.type),
-		    (intmax_t)chain->bref.key, chain->bref.keybits, error);
+		    (long long)chain->bref.key, chain->bref.keybits, error);
 		return (0);
 	}
 
@@ -4040,9 +4018,9 @@ hammer2_chain_indkey_dir(hammer2_chain_t *parent, hammer2_key_t *keyp,
 		nkeybits = keybits;
 		if (nkeybits < bref->keybits) {
 			if (bref->keybits > 64)
-				hpanic("bad %s blockref %016jx/%d",
+				hpanic("bad %s blockref %016llx/%d",
 				    hammer2_breftype_to_str(bref->type),
-				    (intmax_t)bref->key, bref->keybits);
+				    (long long)bref->key, bref->keybits);
 			nkeybits = bref->keybits;
 		}
 		while (nkeybits < 64 &&
@@ -4411,12 +4389,12 @@ hammer2_base_delete(hammer2_chain_t *parent, hammer2_blockref_t *base,
 	    scan->key != elm->key ||
 	    ((chain->flags & HAMMER2_CHAIN_BLKMAPUPD) == 0 &&
 	    scan->keybits != elm->keybits))
-		hpanic("delete %s elm %016jx/%d from %s base %016jx/%d "
+		hpanic("delete %s elm %016llx/%d from %s base %016llx/%d "
 		    "not found at %d/%d",
 		    hammer2_breftype_to_str(elm->type),
-		    (intmax_t)elm->key, elm->keybits,
+		    (long long)elm->key, elm->keybits,
 		    hammer2_breftype_to_str(base->type),
-		    (intmax_t)base->key, base->keybits, i, count);
+		    (long long)base->key, base->keybits, i, count);
 
 	/*
 	 * Update stats and zero the entry.
@@ -4567,12 +4545,12 @@ hammer2_base_insert(hammer2_chain_t *parent, hammer2_blockref_t *base,
 
 	xkey = elm->key + ((hammer2_key_t)1 << elm->keybits) - 1;
 	if (i != count && (base[i].key < elm->key || xkey >= base[i].key))
-		hpanic("insert %s elm %016jx/%d to %s base %016jx/%d "
+		hpanic("insert %s elm %016llx/%d to %s base %016llx/%d "
 		    "overlapping at %d/%d",
 		    hammer2_breftype_to_str(elm->type),
-		    (intmax_t)elm->key, elm->keybits,
+		    (long long)elm->key, elm->keybits,
 		    hammer2_breftype_to_str(base->type),
-		    (intmax_t)base->key, base->keybits, i, count);
+		    (long long)base->key, base->keybits, i, count);
 
 	/* Try to find an empty slot before or after. */
 	j = i;
@@ -4728,13 +4706,13 @@ hammer2_chain_testcheck(const hammer2_chain_t *chain, void *bdata)
 	}
 
 	if (r == 0 && count < 1000) {
-		hprintf("failed: chain %s %016jx %016jx/%d meth %02x "
-		    "mir %016jx mod %016jx flags %08x\n",
+		hprintf("failed: chain %s %016llx %016llx/%d meth %02x "
+		    "mir %016llx mod %016llx flags %08x\n",
 		    hammer2_breftype_to_str(chain->bref.type),
-		    (intmax_t)chain->bref.data_off, (intmax_t)chain->bref.key,
+		    (long long)chain->bref.data_off, (long long)chain->bref.key,
 		    chain->bref.keybits, chain->bref.methods,
-		    (intmax_t)chain->bref.mirror_tid,
-		    (intmax_t)chain->bref.modify_tid, chain->flags);
+		    (long long)chain->bref.mirror_tid,
+		    (long long)chain->bref.modify_tid, chain->flags);
 		count++;
 		if (count >= 1000)
 			hprintf("gave up\n");
@@ -4836,10 +4814,10 @@ hammer2_chain_inode_find(hammer2_pfs_t *pmp, hammer2_key_t inum, int clindex,
 			error = rchain->error;
 			if (error == 0 && rchain->data)
 				if (inum != rchain->data->ipdata.meta.inum) {
-					hprintf("lookup inum %016jx, got valid "
-					    "inode but with inum %016jx\n",
-					    (intmax_t)inum,
-					    (intmax_t)rchain->data->ipdata.meta.inum);
+					hprintf("lookup inum %016llx, got valid "
+					    "inode but with inum %016llx\n",
+					    (long long)inum,
+					    (long long)rchain->data->ipdata.meta.inum);
 					error = HAMMER2_ERROR_CHECK;
 					rchain->error = error;
 				}
@@ -4922,13 +4900,14 @@ hammer2_dump_chain(hammer2_chain_t *chain, int tab, int bi, int depth, char pfx)
 	if (depth != -1 && depth-- == 0)
 		return;
 
-	printf("%*.*s%c-chain %s.%-3d %016jx %016jx/%d mir %016jx mod %016jx\n",
+	printf("%*.*s%c-chain %s.%-3d %016llx %016llx/%d mir %016llx mod "
+	    "%016llx\n",
 	    tab, tab, "", pfx,
 	    hammer2_breftype_to_str(chain->bref.type), bi,
-	    (intmax_t)chain->bref.data_off,
-	    (intmax_t)chain->bref.key, chain->bref.keybits,
-	    (intmax_t)chain->bref.mirror_tid,
-	    (intmax_t)chain->bref.modify_tid);
+	    (long long)chain->bref.data_off,
+	    (long long)chain->bref.key, chain->bref.keybits,
+	    (long long)chain->bref.mirror_tid,
+	    (long long)chain->bref.modify_tid);
 
 	printf("%*.*s      (%s) flags %08x refs %d error %08x",
 	    tab, tab, "",

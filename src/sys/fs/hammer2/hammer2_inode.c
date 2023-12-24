@@ -526,8 +526,8 @@ hammer2_inode_drop_assert(hammer2_inode_t *ip)
 
 	refs = hammer2_mtx_refs(&ip->lock);
 	if (refs) {
-		hprintf("XXX inum %016jx mtx_refs %d mtx_owned %d\n",
-		    (intmax_t)ip->meta.inum, refs,
+		hprintf("XXX inum %016llx mtx_refs %d mtx_owned %d\n",
+		    (long long)ip->meta.inum, refs,
 		    hammer2_mtx_owned(&ip->lock));
 		KKASSERT(ip->meta.inum == 1); /* XXX2 */
 	}
@@ -634,7 +634,8 @@ loop:
 			*vpp = vp;
 			return (0);
 		}
-		hprintf("failed to vget inum %ju\n", ip->meta.inum);
+		hprintf("failed to vget inum %016llx\n",
+		    (long long)ip->meta.inum);
 		goto loop;
 	}
 
@@ -1490,8 +1491,8 @@ hammer2_inode_chain_sync(hammer2_inode_t *ip)
 		if (error == HAMMER2_ERROR_ENOENT)
 			error = 0;
 		if (error) {
-			hprintf("unable to fsync inode %016jx\n",
-			    (intmax_t)ip->meta.inum);
+			hprintf("unable to fsync inode %016llx\n",
+			    (long long)ip->meta.inum);
 			/* XXX return error somehow? */
 		}
 	}
@@ -1520,8 +1521,8 @@ hammer2_inode_chain_ins(hammer2_inode_t *ip)
 		if (error == HAMMER2_ERROR_ENOENT)
 			error = 0;
 		if (error) {
-			hprintf("backend unable to insert inum %016jx\n",
-			    (intmax_t)ip->meta.inum);
+			hprintf("backend unable to insert inum %016llx\n",
+			    (long long)ip->meta.inum);
 			/* XXX return error somehow? */
 		}
 	}
@@ -1556,8 +1557,8 @@ hammer2_inode_chain_des(hammer2_inode_t *ip)
 		if (error == HAMMER2_ERROR_ENOENT)
 			error = 0;
 		if (error) {
-			hprintf("backend unable to delete inode %016jx\n",
-			    (intmax_t)ip->meta.inum);
+			hprintf("backend unable to delete inode %016llx\n",
+			    (long long)ip->meta.inum);
 			/* XXX return error somehow? */
 		}
 	}

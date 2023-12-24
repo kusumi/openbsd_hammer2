@@ -37,6 +37,7 @@
 
 #include "hammer2.h"
 
+#include <sys/limits.h>
 #include <sys/dirent.h>
 #include <sys/namei.h>
 #include <sys/uio.h>
@@ -157,8 +158,8 @@ hammer2_reclaim(void *v)
 	    HAMMER2_INODE_ISUNLINKED) {
 		atomic_set_int(&ip->flags, HAMMER2_INODE_DELETING);
 		hammer2_inode_delayed_sideq(ip);
-		hprintf("inum %016jx unlinked but not disposed\n",
-		    (intmax_t)ip->meta.inum);
+		hprintf("inum %016llx unlinked but not disposed\n",
+		    (long long)ip->meta.inum);
 	}
 	hammer2_inode_unlock(ip);
 
@@ -2263,7 +2264,7 @@ hammer2_print(void *v)
 	} */ *ap = v;
 	hammer2_inode_t *ip = VTOI(ap->a_vp);
 
-	printf("tag VT_HAMMER2, ino %ju", (uintmax_t)ip->meta.inum);
+	printf("tag VT_HAMMER2, ino %016llx", (long long)ip->meta.inum);
 	printf("\n");
 
 	return (0);

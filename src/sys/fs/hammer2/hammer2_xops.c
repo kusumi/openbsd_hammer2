@@ -117,7 +117,8 @@ checkdirempty(hammer2_chain_t *oparent, hammer2_chain_t *ochain, int clindex)
 		if ((ochain->flags & HAMMER2_CHAIN_DELETED) ||
 		    (oparent->flags & HAMMER2_CHAIN_DELETED) ||
 		    ochain->parent != oparent) {
-			hprintf("CHECKDIR inum %016jx RETRY\n", (intmax_t)inum);
+			hprintf("CHECKDIR inum %016llx RETRY\n",
+			    (long long)inum);
 			error = HAMMER2_ERROR_EAGAIN;
 		}
 	}
@@ -403,7 +404,7 @@ again:
 		error2 = hammer2_chain_inode_find(chain->pmp, lhc, clindex, 0,
 		    &parent, &chain);
 		if (error2) {
-			hprintf("lhc %016jx failed\n", (intmax_t)lhc);
+			hprintf("lhc %016llx failed\n", (long long)lhc);
 			error2 = 0; /* silently ignore */
 		}
 		if (error == 0)

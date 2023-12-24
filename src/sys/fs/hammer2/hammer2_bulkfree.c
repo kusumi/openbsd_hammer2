@@ -447,8 +447,8 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 	/* XXX
 	if (size > kmem_lim_size() * 1024 * 1024 / 4) {
 		size = kmem_lim_size() * 1024 * 1024 / 4;
-		hprintf("WARNING: capping bulkfree buffer at %jdMB\n",
-		    (intmax_t)size / (1024 * 1024));
+		hprintf("WARNING: capping bulkfree buffer at %lldMB\n",
+		    (long long)size / (1024 * 1024));
 	}
 	*/
 
@@ -476,7 +476,7 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 	cbinfo.dedup = hmalloc(sizeof(*cbinfo.dedup) * HAMMER2_DEDUP_HEUR_SIZE,
 	    M_HAMMER2, M_WAITOK | M_ZERO);
 
-	hprintf("bulkfree buffer %jdMB\n", (intmax_t)size / (1024 * 1024));
+	hprintf("bulkfree buffer %lldMB\n", (long long)size / (1024 * 1024));
 
 	/*
 	 * Normalize start point to a 1GB boundary.  We operate on a
@@ -525,15 +525,15 @@ hammer2_bulkfree_pass(hammer2_dev_t *hmp, hammer2_chain_t *vchain,
 			cbinfo.sstop = cbinfo.sbase + incr;
 			allmedia = 0;
 		}
-		hprintf("pass %016jx-%016jx ",
-		    (intmax_t)cbinfo.sbase, (intmax_t)cbinfo.sstop);
+		hprintf("pass %016llx-%016llx ",
+		    (long long)cbinfo.sbase, (long long)cbinfo.sstop);
 		if (allmedia && cbinfo.sbase == 0)
 			printf("(all media)\n");
 		else if (allmedia)
 			printf("(remaining media)\n");
 		else
-			printf("(%jdGB of media)\n",
-			    (intmax_t)incr / (1024L*1024*1024));
+			printf("(%lldGB of media)\n",
+			    (long long)incr / (1024L*1024*1024));
 
 		/*
 		 * Scan topology for stuff inside this range.
@@ -737,8 +737,8 @@ h2_bulkfree_callback(hammer2_bulkfree_info_t *cbinfo, hammer2_blockref_t *bref)
 	class = (bref->type << 8) | HAMMER2_PBUFRADIX;
 
 	if (data_off + bytes > cbinfo->sstop) {
-		hprintf("illegal 1GB boundary %016jx %016jx/%d\n",
-		    (intmax_t)bref->data_off, (intmax_t)bref->key,
+		hprintf("illegal 1GB boundary %016llx %016llx/%d\n",
+		    (long long)bref->data_off, (long long)bref->key,
 		    bref->keybits);
 		bytes = cbinfo->sstop - data_off; /* XXX */
 	}
@@ -759,8 +759,8 @@ h2_bulkfree_callback(hammer2_bulkfree_info_t *cbinfo, hammer2_blockref_t *bref)
 	 */
 	data_off &= HAMMER2_FREEMAP_LEVEL0_MASK;
 	if (data_off + bytes > HAMMER2_FREEMAP_LEVEL0_SIZE) {
-		hprintf("illegal 4MB boundary %016jx %016jx/%d\n",
-		    (intmax_t)bref->data_off, (intmax_t)bref->key,
+		hprintf("illegal 4MB boundary %016llx %016llx/%d\n",
+		    (long long)bref->data_off, (long long)bref->key,
 		    bref->keybits);
 		bytes = HAMMER2_FREEMAP_LEVEL0_SIZE - data_off;
 	}
@@ -851,14 +851,14 @@ h2_bulkfree_sync(hammer2_bulkfree_info_t *cbinfo)
 	hprintf("range ");
 
 	if (cbinfo->sbase < cbinfo->hmp->voldata.allocator_beg)
-		printf("%016jx-", (intmax_t)cbinfo->hmp->voldata.allocator_beg);
+		printf("%016llx-", (long long)cbinfo->hmp->voldata.allocator_beg);
 	else
-		printf("%016jx-", (intmax_t)cbinfo->sbase);
+		printf("%016llx-", (long long)cbinfo->sbase);
 
 	if (cbinfo->sstop > cbinfo->hmp->total_size)
-		printf("%016jx\n", (intmax_t)cbinfo->hmp->total_size);
+		printf("%016llx\n", (long long)cbinfo->hmp->total_size);
 	else
-		printf("%016jx\n", (intmax_t)cbinfo->sstop);
+		printf("%016llx\n", (long long)cbinfo->sstop);
 
 	data_off = cbinfo->sbase;
 	bmap = cbinfo->bmap;
@@ -895,9 +895,9 @@ h2_bulkfree_sync(hammer2_bulkfree_info_t *cbinfo)
 			    &key_dummy, key, key + HAMMER2_FREEMAP_LEVEL1_MASK,
 			    &error, HAMMER2_LOOKUP_ALWAYS);
 			if (error) {
-				hprintf("freemap lookup error near %016jx "
+				hprintf("freemap lookup error near %016llx "
 				    "error %d\n",
-				    (intmax_t)data_off, live_chain->error);
+				    (long long)data_off, live_chain->error);
 				break;
 			}
 		}
@@ -910,13 +910,14 @@ h2_bulkfree_sync(hammer2_bulkfree_info_t *cbinfo)
 			if (bmap->class &&
 			    bmap->avail != HAMMER2_FREEMAP_LEVEL0_SIZE)
 				hprintf("cannot locate live leaf for allocated "
-				    "data near %016jx\n",
-				    (intmax_t)data_off);
+				    "data near %016llx\n",
+				    (long long)data_off);
 			goto next;
 		}
 		if (live_chain->error) {
-			hprintf("unable to access freemap near %016jx error %d\n",
-			    (intmax_t)data_off, live_chain->error);
+			hprintf("unable to access freemap near %016llx error "
+			    "%d\n",
+			    (long long)data_off, live_chain->error);
 			hammer2_chain_unlock(live_chain);
 			hammer2_chain_drop(live_chain);
 			live_chain = NULL;
@@ -948,10 +949,10 @@ h2_bulkfree_sync(hammer2_bulkfree_info_t *cbinfo)
 			goto next;
 
 		if (hammer2_chain_modify(live_chain, cbinfo->mtid, 0, 0)) {
-			hprintf("unable to modify freemap at %016jx for "
-			    "data-block %016jx error %d\n",
-			    (intmax_t)live_chain->bref.data_off,
-			    (intmax_t)data_off, live_chain->error);
+			hprintf("unable to modify freemap at %016llx for "
+			    "data-block %016llx error %d\n",
+			    (long long)live_chain->bref.data_off,
+			    (long long)data_off, live_chain->error);
 			hammer2_chain_unlock(live_chain);
 			hammer2_chain_drop(live_chain);
 			live_chain = NULL;
@@ -1065,8 +1066,8 @@ h2_bulkfree_sync_adjust(hammer2_bulkfree_info_t *cbinfo, hammer2_off_t data_off,
 					 * free.
 					 */
 					hprintf("00->11 critical freemap "
-					    "transition for datablock %016jx\n",
-					    (intmax_t)tmp_off);
+					    "transition for datablock %016llx\n",
+					    (long long)tmp_off);
 					++cbinfo->count_00_11;
 					cbinfo->adj_free -=
 					    HAMMER2_FREEMAP_BLOCK_SIZE;

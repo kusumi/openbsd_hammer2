@@ -913,15 +913,15 @@ hammer2_ioctl_growfs(hammer2_inode_t *ip, void *data)
 		return (error);
 	}
 	size = (hammer2_off_t)dl.d_secperunit * dl.d_secsize;
-	hprintf("growfs partition-auto to %016jx\n", (intmax_t)size);
+	hprintf("growfs partition-auto to %016llx\n", (long long)size);
 
 	/* Expand to devvp size unless specified. */
 	grow->modified = 0;
 	if (grow->size == 0) {
 		grow->size = size;
 	} else if (grow->size > size) {
-		hprintf("growfs size %016jx exceeds device size %016jx\n",
-		    (intmax_t)grow->size, (intmax_t)size);
+		hprintf("growfs size %016llx exceeds device size %016llx\n",
+		    (long long)grow->size, (long long)size);
 		return (EINVAL);
 	}
 
@@ -940,8 +940,8 @@ hammer2_ioctl_growfs(hammer2_inode_t *ip, void *data)
 
 	/* We can't shrink a filesystem. */
 	if (grow->size < hmp->voldata.volu_size) {
-		hprintf("growfs failure, would shrink from %016jx to %016jx\n",
-		    (intmax_t)hmp->voldata.volu_size, (intmax_t)grow->size);
+		hprintf("growfs failure, would shrink from %016llx to %016llx\n",
+		    (long long)hmp->voldata.volu_size, (long long)grow->size);
 		return (EINVAL);
 	}
 
@@ -978,8 +978,8 @@ hammer2_ioctl_growfs(hammer2_inode_t *ip, void *data)
 	hammer2_trans_init(hmp->spmp, HAMMER2_TRANS_ISFLUSH);
 	mtid = hammer2_trans_sub(hmp->spmp);
 
-	hprintf("growfs - expand by %016jx to %016jx mtid %016jx\n",
-	    (intmax_t)delta, (intmax_t)grow->size, (intmax_t)mtid);
+	hprintf("growfs - expand by %016llx to %016llx mtid %016llx\n",
+	    (long long)delta, (long long)grow->size, (long long)mtid);
 
 	hammer2_voldata_lock(hmp);
 	hammer2_voldata_modify(hmp);

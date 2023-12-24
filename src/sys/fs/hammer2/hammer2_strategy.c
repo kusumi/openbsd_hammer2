@@ -110,8 +110,8 @@ hammer2_decompress_LZ4_callback(const char *data, unsigned int bytes,
 	result = LZ4_decompress_safe(__DECONST(char *, &data[sizeof(int)]),
 	    compressed_buffer, compressed_size, bp->b_bufsize);
 	if (result < 0) {
-		hprintf("error during decompression: buf %016jx/%016jx/%d\n",
-		    (intmax_t)bp->b_lblkno, (intmax_t)bp->b_blkno, bytes);
+		hprintf("error during decompression: buf %016llx/%016llx/%d\n",
+		    (long long)bp->b_lblkno, (long long)bp->b_blkno, bytes);
 		/* Make sure it isn't random garbage. */
 		bzero(compressed_buffer, bp->b_bufsize);
 	}
@@ -248,8 +248,8 @@ hammer2_xop_strategy_read(hammer2_xop_t *arg, void *scratch, int clindex)
 		splx(s);
 		break;
 	default:
-		hprintf("error %08x at blkno %016jx/%016jx\n",
-		    error, (intmax_t)bp->b_lblkno, (intmax_t)bp->b_blkno);
+		hprintf("error %08x at blkno %016llx/%016llx\n",
+		    error, (long long)bp->b_lblkno, (long long)bp->b_blkno);
 		bp->b_error = EIO;
 		bp->b_flags |= B_ERROR;
 		s = splbio();
@@ -387,8 +387,8 @@ hammer2_xop_strategy_write(hammer2_xop_t *arg, void *scratch, int clindex)
 		biodone(bp);
 		splx(s);
 	} else {
-		hprintf("error %08x at blkno %016jx/%016jx\n",
-		    error, (intmax_t)bp->b_lblkno, (intmax_t)bp->b_blkno);
+		hprintf("error %08x at blkno %016llx/%016llx\n",
+		    error, (long long)bp->b_lblkno, (long long)bp->b_blkno);
 		bp->b_error = EIO;
 		bp->b_flags |= B_ERROR;
 		s = splbio();
@@ -453,11 +453,11 @@ hammer2_assign_physical(hammer2_inode_t *ip, hammer2_chain_t **parentp,
 	 */
 	if (chain && (chain->flags & HAMMER2_CHAIN_DELETED) &&
 	    chain->bref.type != HAMMER2_BREF_TYPE_INODE)
-		hpanic("assign physical deleted %s chain %016jx/%d inum "
-		    "%016jx lbase %016jx",
+		hpanic("assign physical deleted %s chain %016llx/%d inum "
+		    "%016llx lbase %016llx",
 		    hammer2_breftype_to_str(chain->bref.type),
-		    (intmax_t)chain->bref.key, chain->bref.keybits,
-		    (intmax_t)ip->meta.inum, (intmax_t)lbase);
+		    (long long)chain->bref.key, chain->bref.keybits,
+		    (long long)ip->meta.inum, (long long)lbase);
 
 	if (chain == NULL) {
 		/*

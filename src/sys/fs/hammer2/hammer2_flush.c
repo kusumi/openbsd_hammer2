@@ -614,10 +614,10 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 		 *	 embedded data don't need this.
 		 */
 		if (chain->bref.type != HAMMER2_BREF_TYPE_DATA)
-			debug_hprintf("flush %s chain %016jx %016jx/%d\n",
+			debug_hprintf("flush %s chain %016llx %016llx/%d\n",
 			    hammer2_breftype_to_str(chain->bref.type),
-			    (intmax_t)chain->bref.data_off,
-			    (intmax_t)chain->bref.key, chain->bref.keybits);
+			    (long long)chain->bref.data_off,
+			    (long long)chain->bref.key, chain->bref.keybits);
 
 		/*
 		 * Update chain CRCs for flush.
@@ -636,8 +636,8 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 			KKASSERT(hmp->vchain.flags & HAMMER2_CHAIN_MODIFIED);
 			KKASSERT(chain == &hmp->fchain);
 			hmp->voldata.freemap_tid = chain->bref.mirror_tid;
-			debug_hprintf("sync freemap mirror_tid %016jx\n",
-			    (intmax_t)chain->bref.mirror_tid);
+			debug_hprintf("sync freemap mirror_tid %016llx\n",
+			    (long long)chain->bref.mirror_tid);
 
 			/*
 			 * The freemap can be flushed independently of the
@@ -667,8 +667,8 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 			hammer2_chain_lock(&hmp->fchain,
 			    HAMMER2_RESOLVE_ALWAYS);
 			hammer2_voldata_lock(hmp);
-			debug_hprintf("sync volume mirror_tid %016jx\n",
-			    (intmax_t)chain->bref.mirror_tid);
+			debug_hprintf("sync volume mirror_tid %016llx\n",
+			    (long long)chain->bref.mirror_tid);
 
 			/*
 			 * Update the volume header's mirror_tid to the
@@ -701,9 +701,9 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 			    hammer2_icrc32((char *)&hmp->voldata +
 			    HAMMER2_VOLUME_ICRCVH_OFF,
 			    HAMMER2_VOLUME_ICRCVH_SIZE);
-			debug_hprintf("sync volhdr %016jx %016jx\n",
-			    (intmax_t)hmp->voldata.mirror_tid,
-			    (intmax_t)hmp->vchain.bref.mirror_tid);
+			debug_hprintf("sync volhdr %016llx %016llx\n",
+			    (long long)hmp->voldata.mirror_tid,
+			    (long long)hmp->vchain.bref.mirror_tid);
 			hmp->volsync = hmp->voldata;
 			atomic_set_int(&chain->flags, HAMMER2_CHAIN_VOLUMESYNC);
 			hammer2_voldata_unlock(hmp);
@@ -811,13 +811,13 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 	    (flags & HAMMER2_FLUSH_FSSYNC) == 0 &&
 	    (flags & HAMMER2_FLUSH_ALL) == 0 &&
 	    chain->pmp && chain->pmp->mp) {
-		debug_hprintf("inum %016jx do not update parent, non-fssync\n",
-		    (intmax_t)chain->bref.key);
+		debug_hprintf("inum %016llx do not update parent, non-fssync\n",
+		    (long long)chain->bref.key);
 		goto skipupdate;
 	}
 	if (chain->bref.type == HAMMER2_BREF_TYPE_INODE)
-		debug_hprintf("inum %016jx update parent\n",
-		    (intmax_t)chain->bref.key);
+		debug_hprintf("inum %016llx update parent\n",
+		    (long long)chain->bref.key);
 
 	/*
 	 * The chain may need its blockrefs updated in the parent, normal
@@ -880,9 +880,9 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 		save_error = hammer2_chain_modify(parent, 0, 0, 0);
 		if (save_error) {
 			info->error |= save_error;
-			hprintf("%s parent %016jx/%d error %08x\n",
+			hprintf("%s parent %016llx/%d error %08x\n",
 			    hammer2_breftype_to_str(parent->bref.type),
-			    (intmax_t)parent->bref.key, parent->bref.keybits,
+			    (long long)parent->bref.key, parent->bref.keybits,
 			    save_error);
 			atomic_set_int(&chain->flags, HAMMER2_CHAIN_UPDATE);
 			goto skipupdate;
@@ -926,13 +926,7 @@ hammer2_flush_core(hammer2_flush_info_t *info, hammer2_chain_t *chain,
 			break;
 		}
 
-		/*
-		 * Blocktable updates.
-		 *
-		 * We synchronize pending statistics at this time.  Delta
-		 * adjustments designated for the current and upper level
-		 * are synchronized.
-		 */
+		/* Blocktable updates */
 		if (base && (chain->flags & HAMMER2_CHAIN_BLKMAPUPD)) {
 			if (chain->flags & HAMMER2_CHAIN_BLKMAPPED) {
 				hammer2_spin_ex(&parent->core.spin);
@@ -1280,8 +1274,8 @@ hammer2_xop_inode_flush(hammer2_xop_t *arg, void *scratch, int clindex)
 		if (j * HAMMER2_ZONE_BYTES64 + HAMMER2_SEGSIZE >
 		    hmp->volsync.volu_size)
 			j = 0;
-		debug_hprintf("sync volhdr %d %jd\n",
-		    j, (intmax_t)hmp->volsync.volu_size);
+		debug_hprintf("sync volhdr %d size %016llx\n",
+		    j, (long long)hmp->volsync.volu_size);
 
 		blkno = ((off_t)j * HAMMER2_ZONE_BYTES64) / DEV_BSIZE;
 		bp = getblk(hmp->devvp, blkno, HAMMER2_VOLUME_BYTES, 0, 0);

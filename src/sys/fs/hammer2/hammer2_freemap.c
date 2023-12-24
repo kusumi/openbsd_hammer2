@@ -298,8 +298,8 @@ hammer2_freemap_try_alloc(hammer2_chain_t **parentp, hammer2_blockref_t *bref,
 		}
 	} else if (chain->error) {
 		/* Error during lookup. */
-		hprintf("error %d at data_off %016jx\n",
-		    chain->error, (intmax_t)bref->data_off);
+		hprintf("error %d at data_off %016llx\n",
+		    chain->error, (long long)bref->data_off);
 		error = HAMMER2_ERROR_EIO;
 	} else if ((chain->bref.check.freemap.bigmask &
 	    ((size_t)1 << radix)) == 0) {
@@ -839,13 +839,13 @@ hammer2_freemap_adjust(hammer2_dev_t *hmp, hammer2_blockref_t *bref, int how)
 
 	/* Stop early if we are trying to free something but no leaf exists. */
 	if (chain == NULL && how != HAMMER2_FREEMAP_DORECOVER) {
-		hprintf("no chain at data_off %016jx\n",
-		    (intmax_t)bref->data_off);
+		hprintf("no chain at data_off %016llx\n",
+		    (long long)bref->data_off);
 		goto done;
 	}
 	if (chain->error) {
-		hprintf("error %d at data_off %016jx\n",
-		    chain->error, (intmax_t)bref->data_off);
+		hprintf("error %d at data_off %016llx\n",
+		    chain->error, (long long)bref->data_off);
 		hammer2_chain_unlock(chain);
 		hammer2_chain_drop(chain);
 		chain = NULL;

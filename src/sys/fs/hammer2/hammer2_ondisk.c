@@ -285,13 +285,13 @@ hammer2_verify_volumes_common(const hammer2_volume_t *volumes)
 			return (EINVAL);
 		}
 		if (vol->offset == (hammer2_off_t)-1) {
-			hprintf("%s has bad offset %016jx\n",
-			    path, (intmax_t)vol->offset);
+			hprintf("%s has bad offset %016llx\n",
+			    path, (long long)vol->offset);
 			return (EINVAL);
 		}
 		if (vol->size == (hammer2_off_t)-1) {
-			hprintf("%s has bad size %016jx\n",
-			    path, (intmax_t)vol->size);
+			hprintf("%s has bad size %016llx\n",
+			    path, (long long)vol->size);
 			return (EINVAL);
 		}
 
@@ -304,8 +304,8 @@ hammer2_verify_volumes_common(const hammer2_volume_t *volumes)
 		}
 		mediasize = (off_t)dl.d_secperunit * dl.d_secsize;
 		if (vol->size > (hammer2_off_t)mediasize) {
-			hprintf("%s's size %016jx exceeds device size %016jx\n",
-			    path, (intmax_t)vol->size, (intmax_t)mediasize);
+			hprintf("%s's size %016llx exceeds device size %016llx\n",
+			    path, (long long)vol->size, (long long)mediasize);
 			return (EINVAL);
 		}
 	}
@@ -343,15 +343,15 @@ hammer2_verify_volumes_1(const hammer2_volume_t *volumes,
 		return (EINVAL);
 	}
 	if (rootvoldata->total_size) {
-		hprintf("total size %016jx must be 0\n",
-		    (intmax_t)rootvoldata->total_size);
+		hprintf("total size %016llx must be 0\n",
+		    (long long)rootvoldata->total_size);
 		return (EINVAL);
 	}
 	for (i = 0; i < HAMMER2_MAX_VOLUMES; ++i) {
 		off = rootvoldata->volu_loff[i];
 		if (off) {
-			hprintf("volume offset[%d] %016jx must be 0\n",
-			    i, (intmax_t)off);
+			hprintf("volume offset[%d] %016llx must be 0\n",
+			    i, (long long)off);
 			return (EINVAL);
 		}
 	}
@@ -364,13 +364,13 @@ hammer2_verify_volumes_1(const hammer2_volume_t *volumes,
 		return (EINVAL);
 	}
 	if (vol->offset) {
-		hprintf("%s has non zero offset %016jx\n",
-		    path, (intmax_t)vol->offset);
+		hprintf("%s has non zero offset %016llx\n",
+		    path, (long long)vol->offset);
 		return (EINVAL);
 	}
 	if (vol->size & HAMMER2_VOLUME_ALIGNMASK64) {
-		hprintf("%s's size is not %016jx aligned\n",
-		    path, (intmax_t)HAMMER2_VOLUME_ALIGN);
+		hprintf("%s's size is not %016llx aligned\n",
+		    path, (long long)HAMMER2_VOLUME_ALIGN);
 		return (EINVAL);
 	}
 
@@ -407,24 +407,24 @@ hammer2_verify_volumes_2(const hammer2_volume_t *volumes,
 		return (EINVAL);
 	}
 	if (rootvoldata->total_size != total_size) {
-		hprintf("total size %016jx does not equal sum of volumes "
-		    "%016jx\n",
-		    (intmax_t)rootvoldata->total_size, (intmax_t)total_size);
+		hprintf("total size %016llx does not equal sum of volumes "
+		    "%016llx\n",
+		    (long long)rootvoldata->total_size, (long long)total_size);
 		return (EINVAL);
 	}
 	for (i = 0; i < nvolumes; ++i) {
 		off = rootvoldata->volu_loff[i];
 		if (off == (hammer2_off_t)-1) {
-			hprintf("volume offset[%d] %016jx must not be -1\n",
-			    i, (intmax_t)off);
+			hprintf("volume offset[%d] %016llx must not be -1\n",
+			    i, (long long)off);
 			return (EINVAL);
 		}
 	}
 	for (i = nvolumes; i < HAMMER2_MAX_VOLUMES; ++i) {
 		off = rootvoldata->volu_loff[i];
 		if (off != (hammer2_off_t)-1) {
-			hprintf("volume offset[%d] %016jx must be -1\n",
-			    i, (intmax_t)off);
+			hprintf("volume offset[%d] %016llx must be -1\n",
+			    i, (long long)off);
 			return (EINVAL);
 		}
 	}
@@ -437,9 +437,9 @@ hammer2_verify_volumes_2(const hammer2_volume_t *volumes,
 		path = vol->dev->path;
 		/* Check offset. */
 		if (vol->offset & HAMMER2_FREEMAP_LEVEL1_MASK) {
-			hprintf("%s's offset %016jx not %016jx aligned\n",
-			    path, (intmax_t)vol->offset,
-			    (intmax_t)HAMMER2_FREEMAP_LEVEL1_SIZE);
+			hprintf("%s's offset %016llx not %016llx aligned\n",
+			    path, (long long)vol->offset,
+			    (long long)HAMMER2_FREEMAP_LEVEL1_SIZE);
 			return (EINVAL);
 		}
 		/* Check vs previous volume. */
@@ -450,35 +450,35 @@ hammer2_verify_volumes_2(const hammer2_volume_t *volumes,
 				return (EINVAL);
 			}
 			if (vol->offset != (vol-1)->offset + (vol-1)->size) {
-				hprintf("%s has inconsistent offset %016jx\n",
-				    path, (intmax_t)vol->offset);
+				hprintf("%s has inconsistent offset %016llx\n",
+				    path, (long long)vol->offset);
 				return (EINVAL);
 			}
 		} else { /* first */
 			if (vol->offset) {
-				hprintf("%s has non zero offset %016jx\n",
-				    path, (intmax_t)vol->offset);
+				hprintf("%s has non zero offset %016llx\n",
+				    path, (long long)vol->offset);
 				return (EINVAL);
 			}
 		}
 		/* Check size for non-last and last volumes. */
 		if (i != rootvoldata->nvolumes - 1) {
 			if (vol->size < HAMMER2_FREEMAP_LEVEL1_SIZE) {
-				hprintf("%s's size must be >= %016jx\n",
+				hprintf("%s's size must be >= %016llx\n",
 				    path,
-				    (intmax_t)HAMMER2_FREEMAP_LEVEL1_SIZE);
+				    (long long)HAMMER2_FREEMAP_LEVEL1_SIZE);
 				return (EINVAL);
 			}
 			if (vol->size & HAMMER2_FREEMAP_LEVEL1_MASK) {
-				hprintf("%s's size is not %016jx aligned\n",
+				hprintf("%s's size is not %016llx aligned\n",
 				    path,
-				    (intmax_t)HAMMER2_FREEMAP_LEVEL1_SIZE);
+				    (long long)HAMMER2_FREEMAP_LEVEL1_SIZE);
 				return (EINVAL);
 			}
 		} else { /* last */
 			if (vol->size & HAMMER2_VOLUME_ALIGNMASK64) {
-				hprintf("%s's size is not %016jx aligned\n",
-				    path, (intmax_t)HAMMER2_VOLUME_ALIGN);
+				hprintf("%s's size is not %016llx aligned\n",
+				    path, (long long)HAMMER2_VOLUME_ALIGN);
 				return (EINVAL);
 			}
 		}
@@ -751,9 +751,10 @@ hammer2_init_volumes(const hammer2_devvp_list_t *devvpl,
 			KKASSERT(*rootvoldevvp == NULL);
 			*rootvoldevvp = devvp;
 		}
-		debug_hprintf("\"%s\" zone %d id %d offset %016jx size %016jx\n",
-		    path, zone, vol->id, (intmax_t)vol->offset,
-		    (intmax_t)vol->size);
+		debug_hprintf("\"%s\" zone %d id %d offset %016llx size "
+		    "%016llx\n",
+		    path, zone, vol->id, (long long)vol->offset,
+		    (long long)vol->size);
 	}
 done:
 	if (!error) {
@@ -791,7 +792,7 @@ hammer2_get_volume(hammer2_dev_t *hmp, hammer2_off_t offset)
 	//hammer2_voldata_unlock(hmp);
 
 	if (!ret)
-		hpanic("no volume for offset %016jx", (intmax_t)offset);
+		hpanic("no volume for offset %016llx", (long long)offset);
 
 	KKASSERT(ret);
 	KKASSERT(ret->dev);
