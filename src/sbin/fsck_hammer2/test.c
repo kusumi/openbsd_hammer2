@@ -136,13 +136,12 @@ static void print_blockref_stats(const blockref_stats_t *, bool);
 static int verify_volume_header(const hammer2_volume_data_t *);
 static int read_media(const hammer2_blockref_t *, hammer2_media_data_t *,
     size_t *);
-static int verify_blockref(const hammer2_volume_data_t *,
-    const hammer2_blockref_t *, bool, blockref_stats_t *,
+static int verify_blockref(const hammer2_blockref_t *, bool, blockref_stats_t *,
     struct blockref_tree *, delta_stats_t *, int, int);
 static void print_pfs(const hammer2_inode_data_t *);
 static char *get_inode_filename(const hammer2_inode_data_t *);
-static int init_pfs_blockref(const hammer2_volume_data_t *,
-    const hammer2_blockref_t *, struct blockref_list *);
+static int init_pfs_blockref(const hammer2_blockref_t *,
+    struct blockref_list *);
 static void cleanup_pfs_blockref(struct blockref_list *);
 static void print_media(FILE *, int, const hammer2_blockref_t *,
     const hammer2_media_data_t *, size_t);
@@ -292,9 +291,7 @@ test_blockref(uint8_t type)
 
 	init_delta_root(&droot);
 	for (i = 0; i < HAMMER2_NUM_VOLHDRS; ++i) {
-		hammer2_volume_data_t voldata;
 		hammer2_blockref_t broot;
-		ssize_t ret;
 
 		if (ScanBest && i != best_zone)
 			continue;
@@ -304,31 +301,18 @@ test_blockref(uint8_t type)
 			break;
 		}
 		init_root_blockref(i, type, &broot);
-		ret = read(hammer2_get_root_volume_fd(), &voldata,
-		    HAMMER2_VOLUME_BYTES);
-		if (ret == HAMMER2_VOLUME_BYTES) {
-			blockref_stats_t bstats;
-			init_blockref_stats(&bstats, type);
-			delta_stats_t ds;
-			memset(&ds, 0, sizeof(ds));
-			tprintf_zone(0, i, &broot);
-			if (verify_blockref(&voldata, &broot, false, &bstats,
-			    &droot, &ds, 0, 0) == -1)
-				failed = true;
-			print_blockref_stats(&bstats, true);
-			print_blockref_entry(&bstats.root);
-			cleanup_blockref_stats(&bstats);
-		} else if (ret == -1) {
-			perror("read");
+		blockref_stats_t bstats;
+		init_blockref_stats(&bstats, type);
+		delta_stats_t ds;
+		memset(&ds, 0, sizeof(ds));
+		tprintf_zone(0, i, &broot);
+		if (verify_blockref(&broot, false, &bstats, &droot, &ds, 0, 0)
+		    == -1)
 			failed = true;
-			goto end;
-		} else {
-			tfprintf(stderr, 1, "Failed to read volume header\n");
-			failed = true;
-			goto end;
-		}
+		print_blockref_stats(&bstats, true);
+		print_blockref_entry(&bstats.root);
+		cleanup_blockref_stats(&bstats);
 	}
-end:
 	cleanup_delta_root(&droot);
 	return failed ? -1 : 0;
 }
@@ -343,9 +327,10 @@ test_pfs_blockref(void)
 
 	init_delta_root(&droot);
 	for (i = 0; i < HAMMER2_NUM_VOLHDRS; ++i) {
-		hammer2_volume_data_t voldata;
 		hammer2_blockref_t broot;
-		ssize_t ret;
+		struct blockref_list blist;
+		struct blockref_msg *p;
+		int count = 0;
 
 		if (ScanBest && i != best_zone)
 			continue;
@@ -355,76 +340,57 @@ test_pfs_blockref(void)
 			break;
 		}
 		init_root_blockref(i, type, &broot);
-		ret = read(hammer2_get_root_volume_fd(), &voldata,
-		    HAMMER2_VOLUME_BYTES);
-		if (ret == HAMMER2_VOLUME_BYTES) {
-			struct blockref_list blist;
-			struct blockref_msg *p;
-			int count = 0;
-
-			tprintf_zone(0, i, &broot);
-			TAILQ_INIT(&blist);
-			if (init_pfs_blockref(&voldata, &broot, &blist) == -1) {
-				tfprintf(stderr, 1, "Failed to read PFS "
-				    "blockref\n");
-				failed = true;
-				continue;
-			}
-			if (TAILQ_EMPTY(&blist)) {
-				tfprintf(stderr, 1, "Failed to find PFS "
-				    "blockref\n");
-				failed = true;
-				continue;
-			}
-			TAILQ_FOREACH(p, &blist, entry) {
-				blockref_stats_t bstats;
-				bool found = false;
-				char *f = get_inode_filename(p->msg);
-				if (NumPFSNames) {
-					int j;
-					for (j = 0; j < NumPFSNames; j++)
-						if (!strcmp(PFSNames[j], f))
-							found = true;
-				} else
-					found = true;
-				if (!found) {
-					free(f);
-					continue;
-				}
-				count++;
-				if (PrintPFS) {
-					print_pfs(p->msg);
-					free(f);
-					continue;
-				}
-				tfprintf(stdout, 1, "%s\n", f);
+		tprintf_zone(0, i, &broot);
+		TAILQ_INIT(&blist);
+		if (init_pfs_blockref(&broot, &blist) == -1) {
+			tfprintf(stderr, 1, "Failed to read PFS blockref\n");
+			failed = true;
+			continue;
+		}
+		if (TAILQ_EMPTY(&blist)) {
+			tfprintf(stderr, 1, "Failed to find PFS blockref\n");
+			failed = true;
+			continue;
+		}
+		TAILQ_FOREACH(p, &blist, entry) {
+			blockref_stats_t bstats;
+			bool found = false;
+			char *f = get_inode_filename(p->msg);
+			if (NumPFSNames) {
+				int j;
+				for (j = 0; j < NumPFSNames; j++)
+					if (!strcmp(PFSNames[j], f))
+						found = true;
+			} else
+				found = true;
+			if (!found) {
 				free(f);
-				init_blockref_stats(&bstats, type);
-				delta_stats_t ds;
-				memset(&ds, 0, sizeof(ds));
-				if (verify_blockref(&voldata, &p->bref, false,
-				    &bstats, &droot, &ds, 0, 0) == -1)
-					failed = true;
-				print_blockref_stats(&bstats, true);
-				print_blockref_entry(&bstats.root);
-				cleanup_blockref_stats(&bstats);
+				continue;
 			}
-			cleanup_pfs_blockref(&blist);
-			if (NumPFSNames && !count) {
-				tfprintf(stderr, 1, "PFS not found\n");
+			count++;
+			if (PrintPFS) {
+				print_pfs(p->msg);
+				free(f);
+				continue;
+			}
+			tfprintf(stdout, 1, "%s\n", f);
+			free(f);
+			init_blockref_stats(&bstats, type);
+			delta_stats_t ds;
+			memset(&ds, 0, sizeof(ds));
+			if (verify_blockref(&p->bref, false, &bstats, &droot,
+			    &ds, 0, 0) == -1)
 				failed = true;
-			}
-		} else if (ret == -1) {
-			perror("read");
+			print_blockref_stats(&bstats, true);
+			print_blockref_entry(&bstats.root);
+			cleanup_blockref_stats(&bstats);
+		}
+		cleanup_pfs_blockref(&blist);
+		if (NumPFSNames && !count) {
+			tfprintf(stderr, 1, "PFS not found\n");
 			failed = true;
-			goto end;
-		} else {
-			tfprintf(stderr, 1, "Failed to read volume header\n");
-			failed = true;
-			goto end;
 		}
 	}
-end:
 	cleanup_delta_root(&droot);
 	return failed ? -1 : 0;
 }
@@ -779,9 +745,9 @@ accumulate_delta_stats(delta_stats_t *dst, const delta_stats_t *src)
 }
 
 static int
-verify_blockref(const hammer2_volume_data_t *voldata,
-    const hammer2_blockref_t *bref, bool norecurse, blockref_stats_t *bstats,
-    struct blockref_tree *droot, delta_stats_t *dstats, int depth, int index)
+verify_blockref(const hammer2_blockref_t *bref, bool norecurse,
+    blockref_stats_t *bstats, struct blockref_tree *droot,
+    delta_stats_t *dstats, int depth, int index)
 {
 	hammer2_media_data_t media;
 	hammer2_blockref_t *bscan;
@@ -997,8 +963,8 @@ verify_blockref(const hammer2_volume_data_t *voldata,
 	for (i = 0; norecurse == false && i < bcount; ++i) {
 		delta_stats_t ds;
 		memset(&ds, 0, sizeof(ds));
-		if (verify_blockref(voldata, &bscan[i], failed, bstats, droot,
-		    &ds, depth + 1, i) == -1)
+		if (verify_blockref(&bscan[i], failed, bstats, droot, &ds,
+		    depth + 1, i) == -1)
 			return -1;
 		if (!failed)
 			accumulate_delta_stats(dstats, &ds);
@@ -1084,8 +1050,7 @@ __add_pfs_blockref(const hammer2_blockref_t *bref, struct blockref_list *blist,
 }
 
 static int
-init_pfs_blockref(const hammer2_volume_data_t *voldata,
-    const hammer2_blockref_t *bref, struct blockref_list *blist)
+init_pfs_blockref(const hammer2_blockref_t *bref, struct blockref_list *blist)
 {
 	hammer2_media_data_t media;
 	hammer2_inode_data_t ipdata;
@@ -1128,7 +1093,7 @@ init_pfs_blockref(const hammer2_volume_data_t *voldata,
 	}
 
 	for (i = 0; i < bcount; ++i)
-		if (init_pfs_blockref(voldata, &bscan[i], blist) == -1)
+		if (init_pfs_blockref(&bscan[i], blist) == -1)
 			return -1;
 	return 0;
 }
@@ -1189,9 +1154,9 @@ print_media(FILE *fp, int tab, const hammer2_blockref_t *bref,
 		tfprintf(fp, tab, "size %ju ", (uintmax_t)ipdata->meta.size);
 		if (ipdata->meta.op_flags & HAMMER2_OPFLAG_DIRECTDATA &&
 		    ipdata->meta.size <= HAMMER2_EMBEDDED_BYTES)
-			printf("(embedded data)\n");
+			fprintf(fp, "(embedded data)\n");
 		else
-			printf("\n");
+			fprintf(fp, "\n");
 		tfprintf(fp, tab, "nlinks %ju\n",
 		    (uintmax_t)ipdata->meta.nlinks);
 		tfprintf(fp, tab, "iparent 0x%016jx\n",
@@ -1200,9 +1165,10 @@ print_media(FILE *fp, int tab, const hammer2_blockref_t *bref,
 		    (uintmax_t)ipdata->meta.name_key);
 		tfprintf(fp, tab, "name_len %u\n", ipdata->meta.name_len);
 		tfprintf(fp, tab, "ncopies %u\n", ipdata->meta.ncopies);
-		tfprintf(fp, tab, "comp_algo %u\n", ipdata->meta.comp_algo);
-		tfprintf(fp, tab, "target_type %u\n", ipdata->meta.target_type);
-		tfprintf(fp, tab, "check_algo %u\n", ipdata->meta.check_algo);
+		tfprintf(fp, tab, "comp_algo %s\n",
+		    hammer2_compmode_to_str(ipdata->meta.comp_algo));
+		tfprintf(fp, tab, "check_algo %s\n",
+		    hammer2_checkmode_to_str(ipdata->meta.check_algo));
 		if ((ipdata->meta.op_flags & HAMMER2_OPFLAG_PFSROOT) ||
 		    ipdata->meta.pfs_type == HAMMER2_PFSTYPE_SUPROOT) {
 			tfprintf(fp, tab, "pfs_nmasters %u\n",

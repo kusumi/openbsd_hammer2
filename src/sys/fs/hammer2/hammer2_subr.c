@@ -138,7 +138,7 @@ hammer2_timespec_to_time(const struct timespec *ts)
 	xtime = (unsigned)(ts->tv_nsec / 1000) +
 	    (unsigned long)ts->tv_sec * 1000000ULL;
 
-	return(xtime);
+	return (xtime);
 }
 
 /*

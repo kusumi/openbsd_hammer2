@@ -86,15 +86,15 @@ int
 cmd_show(const char *devpath, int which)
 {
 	hammer2_blockref_t broot;
-	hammer2_blockref_t best;
 	hammer2_media_data_t media;
-	hammer2_media_data_t best_media;
 	hammer2_off_t off, volu_loff, next_volu_loff = 0;
+	hammer2_tid_t best_mirror_tid = 0;
+	int bests[HAMMER2_MAX_VOLUMES];
 	int fd;
-	int i;
-	int best_i;
+	int i, j;
 	char *env;
 
+	memset(bests, 0xff, sizeof(bests));
 	memset(TotalAccum16, 0, sizeof(TotalAccum16));
 	memset(TotalAccum64, 0, sizeof(TotalAccum64));
 	TotalUnavail = TotalFreemap = 0;
@@ -104,124 +104,125 @@ cmd_show(const char *devpath, int which)
 		show_all_volume_headers = (int)strtol(env, NULL, 0);
 		if (errno)
 			show_all_volume_headers = 0;
+		errno = 0;
 	}
 	env = getenv("HAMMER2_SHOW_TAB");
 	if (env != NULL) {
 		show_tab = (int)strtol(env, NULL, 0);
 		if (errno || show_tab < 0 || show_tab > 8)
 			show_tab = 2;
+		errno = 0;
 	}
 	env = getenv("HAMMER2_SHOW_DEPTH");
 	if (env != NULL) {
 		show_depth = (int)strtol(env, NULL, 0);
 		if (errno || show_depth < 0)
 			show_depth = -1;
+		errno = 0;
 	}
 	env = getenv("HAMMER2_SHOW_MIN_MIRROR_TID");
 	if (env != NULL) {
 		show_min_mirror_tid = (hammer2_tid_t)strtoull(env, NULL, 16);
 		if (errno)
 			show_min_mirror_tid = 0;
+		errno = 0;
 	}
 	env = getenv("HAMMER2_SHOW_MIN_MODIFY_TID");
 	if (env != NULL) {
 		show_min_modify_tid = (hammer2_tid_t)strtoull(env, NULL, 16);
 		if (errno)
 			show_min_modify_tid = 0;
+		errno = 0;
 	}
 
 	hammer2_init_volumes(devpath, 1);
 	int all_volume_headers = VerboseOpt >= 3 || show_all_volume_headers;
-next_volume:
-	volu_loff = next_volu_loff;
-	next_volu_loff = -1;
-	printf("%s\n", hammer2_get_volume_path(volu_loff));
+
+	/*
+	 * Get best volume header for all volumes first.
+	 */
+	volu_loff = 0;
+	for (i = 0; i < HAMMER2_MAX_VOLUMES; ++i) {
+		for (j = 0; j < HAMMER2_NUM_VOLHDRS; ++j) {
+			off = j * HAMMER2_ZONE_BYTES64;
+			fd = hammer2_get_volume_fd(volu_loff);
+			lseek(fd, off, SEEK_SET);
+			if (read(fd, &media, HAMMER2_PBUFSIZE) ==
+			    (ssize_t)HAMMER2_PBUFSIZE) {
+				if (bests[i] < 0 || best_mirror_tid <
+				    media.voldata.mirror_tid) {
+					bests[i] = j;
+					best_mirror_tid = media.voldata.mirror_tid;
+				}
+			}
+		}
+		volu_loff = get_next_volume(&media.voldata, volu_loff);
+	}
+
 	/*
 	 * Show the tree using the best volume header.
 	 * -vvv will show the tree for all four volume headers.
 	 */
-	best_i = -1;
-	bzero(&best, sizeof(best));
-	bzero(&best_media, sizeof(best_media));
-	for (i = 0; i < HAMMER2_NUM_VOLHDRS; ++i) {
-		bzero(&broot, sizeof(broot));
-		broot.data_off = (i * HAMMER2_ZONE_BYTES64) | HAMMER2_PBUFRADIX;
-		off = broot.data_off & ~HAMMER2_OFF_MASK_RADIX;
-		fd = hammer2_get_volume_fd(volu_loff);
-		lseek(fd, off, SEEK_SET);
-		if (read(fd, &media, HAMMER2_PBUFSIZE) ==
-		    (ssize_t)HAMMER2_PBUFSIZE) {
-			broot.mirror_tid = media.voldata.mirror_tid;
-			if (best_i < 0 || best.mirror_tid < broot.mirror_tid) {
-				best_i = i;
-				best = broot;
-				best_media = media;
-			}
-			printf("Volume header %d: mirror_tid=%016jx\n",
-			       i, (intmax_t)broot.mirror_tid);
-
-			if (all_volume_headers) {
-				switch(which) {
-				case 0:
-					broot.type = HAMMER2_BREF_TYPE_VOLUME;
-					show_bref(&media.voldata, 0, i, &broot,
-						  0);
-					break;
-				case 1:
-					broot.type = HAMMER2_BREF_TYPE_FREEMAP;
-					show_bref(&media.voldata, 0, i, &broot,
-						  0);
-					break;
-				default:
-					show_volhdr(&media.voldata, i);
-					if (i == 0)
-						next_volu_loff = get_next_volume(&media.voldata, volu_loff);
-					break;
-				}
-				if (i != HAMMER2_NUM_VOLHDRS - 1)
+	for (i = 0; i < HAMMER2_MAX_VOLUMES; ++i) {
+		volu_loff = next_volu_loff;
+		printf("%s\n", hammer2_get_volume_path(volu_loff));
+		for (j = 0; j < HAMMER2_NUM_VOLHDRS; ++j) {
+			bzero(&broot, sizeof(broot));
+			broot.data_off = (j * HAMMER2_ZONE_BYTES64) |
+			    HAMMER2_PBUFRADIX;
+			off = broot.data_off & ~HAMMER2_OFF_MASK_RADIX;
+			fd = hammer2_get_volume_fd(volu_loff);
+			lseek(fd, off, SEEK_SET);
+			if (read(fd, &media, HAMMER2_PBUFSIZE) ==
+			    (ssize_t)HAMMER2_PBUFSIZE) {
+				broot.mirror_tid = media.voldata.mirror_tid;
+				printf("Volume %d header %d: mirror_tid=%016jx\n",
+				       media.voldata.volu_id, j,
+				       (intmax_t)broot.mirror_tid);
+				if (all_volume_headers || bests[i] == j) {
+					switch(which) {
+					case 0:
+						broot.type = HAMMER2_BREF_TYPE_VOLUME;
+						show_bref(&media.voldata, 0, j,
+							  &broot, 0);
+						next_volu_loff = -1;
+						break;
+					case 1:
+						broot.type = HAMMER2_BREF_TYPE_FREEMAP;
+						show_bref(&media.voldata, 0, j,
+							  &broot, 0);
+						next_volu_loff = -1;
+						break;
+					default:
+						show_volhdr(&media.voldata, j);
+						next_volu_loff = get_next_volume(
+						    &media.voldata, volu_loff);
+						break;
+					}
+				if (all_volume_headers && j != HAMMER2_NUM_VOLHDRS - 1)
 					printf("\n");
+				}
 			}
 		}
-	}
-	if (next_volu_loff != (hammer2_off_t)-1) {
-		printf("---------------------------------------------\n");
-		goto next_volume;
-	}
-
-	if (!all_volume_headers) {
-		switch(which) {
-		case 0:
-			best.type = HAMMER2_BREF_TYPE_VOLUME;
-			show_bref(&best_media.voldata, 0, best_i, &best, 0);
+		if (next_volu_loff == (hammer2_off_t)-1)
 			break;
-		case 1:
-			best.type = HAMMER2_BREF_TYPE_FREEMAP;
-			show_bref(&best_media.voldata, 0, best_i, &best, 0);
-			break;
-		default:
-			show_volhdr(&best_media.voldata, best_i);
-			next_volu_loff = get_next_volume(&best_media.voldata, volu_loff);
-			if (next_volu_loff != (hammer2_off_t)-1) {
-				printf("---------------------------------------------\n");
-				goto next_volume;
-			}
-			break;
-		}
+		if (i != HAMMER2_MAX_VOLUMES - 1)
+			printf("---------------------------------------------\n");
 	}
 
 	if (which == 1 && VerboseOpt < 3) {
-		printf("Total unallocated storage:   %6.3fGiB (%6.3fGiB in 64KB chunks)\n",
+		printf("Total unallocated storage:   %6.3fGB (%6.3fGB in 64KB chunks)\n",
 		       (double)TotalAccum16[0] / GIG,
 		       (double)TotalAccum64[0] / GIG);
-		printf("Total possibly free storage: %6.3fGiB (%6.3fGiB in 64KB chunks)\n",
+		printf("Total possibly free storage: %6.3fGB (%6.3fGB in 64KB chunks)\n",
 		       (double)TotalAccum16[2] / GIG,
 		       (double)TotalAccum64[2] / GIG);
-		printf("Total allocated storage:     %6.3fGiB (%6.3fGiB in 64KB chunks)\n",
+		printf("Total allocated storage:     %6.3fGB (%6.3fGB in 64KB chunks)\n",
 		       (double)TotalAccum16[3] / GIG,
 		       (double)TotalAccum64[3] / GIG);
-		printf("Total unavailable storage:   %6.3fGiB\n",
+		printf("Total unavailable storage:   %6.3fGB\n",
 		       (double)TotalUnavail / GIG);
-		printf("Total freemap storage:       %6.3fGiB\n",
+		printf("Total freemap storage:       %6.3fGB\n",
 		       (double)TotalFreemap / GIG);
 	}
 	hammer2_cleanup_volumes();
@@ -238,7 +239,7 @@ show_volhdr(hammer2_volume_data_t *voldata, int bi)
 	char *buf;
 	uuid_t uuid;
 
-	printf("\nVolume header %d {\n", bi);
+	printf("\nVolume %d header %d {\n", voldata->volu_id, bi);
 	printf("    magic          0x%016jx\n", (intmax_t)voldata->magic);
 	printf("    boot_beg       0x%016jx\n", (intmax_t)voldata->boot_beg);
 	printf("    boot_end       0x%016jx (%6.2fMB)\n",
@@ -250,7 +251,7 @@ show_volhdr(hammer2_volume_data_t *voldata, int bi)
 	       (intmax_t)voldata->aux_end,
 	       (double)(voldata->aux_end - voldata->aux_beg) /
 	       (1024.0*1024.0));
-	printf("    volu_size      0x%016jx (%6.2fGiB)\n",
+	printf("    volu_size      0x%016jx (%6.2fGB)\n",
 	       (intmax_t)voldata->volu_size,
 	       (double)voldata->volu_size / GIG);
 	printf("    version        %d\n", voldata->version);
@@ -278,13 +279,13 @@ show_volhdr(hammer2_volume_data_t *voldata, int bi)
 	printf("                   (%s)\n", name);
 	free(str);
 
-	printf("    allocator_size 0x%016jx (%6.2fGiB)\n",
+	printf("    allocator_size 0x%016jx (%6.2fGB)\n",
 	       voldata->allocator_size,
 	       (double)voldata->allocator_size / GIG);
-	printf("    allocator_free 0x%016jx (%6.2fGiB)\n",
+	printf("    allocator_free 0x%016jx (%6.2fGB)\n",
 	       voldata->allocator_free,
 	       (double)voldata->allocator_free / GIG);
-	printf("    allocator_beg  0x%016jx (%6.2fGiB)\n",
+	printf("    allocator_beg  0x%016jx (%6.2fGB)\n",
 	       voldata->allocator_beg,
 	       (double)voldata->allocator_beg / GIG);
 
@@ -738,8 +739,6 @@ show_bref(hammer2_volume_data_t *voldata, int tab, int bi,
 			  media.ipdata.meta.ncopies);
 		tabprintf(tab, "compalg  %s\n",
 			  hammer2_compmode_to_str(media.ipdata.meta.comp_algo));
-		tabprintf(tab, "target_t %u\n",
-			  media.ipdata.meta.target_type);
 		tabprintf(tab, "checkalg %s\n",
 			  hammer2_checkmode_to_str(media.ipdata.meta.check_algo));
 		if ((media.ipdata.meta.op_flags & HAMMER2_OPFLAG_PFSROOT) ||

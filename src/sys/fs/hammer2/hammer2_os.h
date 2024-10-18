@@ -76,20 +76,64 @@
 /* mutex(9) is spinlock in OpenBSD. */
 typedef struct rwlock hammer2_lk_t;
 
-#define hammer2_lk_init(p, s)		rw_init(p, s)
-#define hammer2_lk_ex(p)		rw_enter_write(p)
-#define hammer2_lk_unlock(p)		rw_exit_write(p)
-#define hammer2_lk_destroy(p)		do {} while (0)
+static __inline void
+hammer2_lk_init(hammer2_lk_t *p, const char *s)
+{
+	rw_init(p, s);
+}
 
-#define hammer2_lk_assert_ex(p)		KASSERT(rw_status(p) == RW_WRITE)
-#define hammer2_lk_assert_unlocked(p)	KASSERT(rw_status(p) == 0)
+static __inline void
+hammer2_lk_ex(hammer2_lk_t *p)
+{
+	rw_enter_write(p);
+}
+
+static __inline void
+hammer2_lk_unlock(hammer2_lk_t *p)
+{
+	rw_exit_write(p);
+}
+
+static __inline void
+hammer2_lk_destroy(hammer2_lk_t *p __unused)
+{
+}
+
+static __inline void
+hammer2_lk_assert_ex(hammer2_lk_t *p)
+{
+	KASSERT(rw_status(p) == RW_WRITE);
+}
+
+static __inline void
+hammer2_lk_assert_unlocked(hammer2_lk_t *p)
+{
+	KASSERT(rw_status(p) == 0);
+}
 
 typedef int hammer2_lkc_t;
 
-#define hammer2_lkc_init(c, s)		do {} while (0)
-#define hammer2_lkc_destroy(c)		do {} while (0)
-#define hammer2_lkc_sleep(c, p, s)	rwsleep(c, p, PCATCH, s, 0)
-#define hammer2_lkc_wakeup(c)		wakeup(c)
+static __inline void
+hammer2_lkc_init(hammer2_lkc_t *c __unused, const char *s __unused)
+{
+}
+
+static __inline void
+hammer2_lkc_destroy(hammer2_lkc_t *c __unused)
+{
+}
+
+static __inline void
+hammer2_lkc_sleep(hammer2_lkc_t *c, hammer2_lk_t *p, const char *s)
+{
+	rwsleep(c, p, PCATCH, s, 0);
+}
+
+static __inline void
+hammer2_lkc_wakeup(hammer2_lkc_t *c)
+{
+	wakeup(c);
+}
 
 /*
  * Mutex and spinlock shims.
@@ -102,28 +146,83 @@ struct rrwlock_wrapper {
 };
 typedef struct rrwlock_wrapper hammer2_mtx_t;
 
-#define hammer2_mtx_init(p, s)		\
-	do { bzero(p, sizeof(*(p))); rrw_init(&(p)->lock, s); } while (0)
-#define hammer2_mtx_init_recurse(p, s)	\
-	do { bzero(p, sizeof(*(p))); rrw_init(&(p)->lock, s); } while (0)
-#define hammer2_mtx_ex(p)		\
-	do { rrw_enter(&(p)->lock, RW_WRITE); (p)->refs++; } while (0)
-#define hammer2_mtx_sh(p)		\
-	do { rrw_enter(&(p)->lock, RW_READ); (p)->refs++; } while (0)
-#define hammer2_mtx_unlock(p)		\
-	do { (p)->refs--; rrw_exit(&(p)->lock); } while (0)
-#define hammer2_mtx_refs(p)		((p)->refs)
-#define hammer2_mtx_destroy(p)		do {} while (0)
+static __inline void
+hammer2_mtx_init(hammer2_mtx_t *p, const char *s)
+{
+	bzero(p, sizeof(*p));
+	rrw_init(&p->lock, s);
+}
+
+static __inline void
+hammer2_mtx_init_recurse(hammer2_mtx_t *p, const char *s)
+{
+	bzero(p, sizeof(*p));
+	rrw_init(&p->lock, s);
+}
+
+static __inline void
+hammer2_mtx_ex(hammer2_mtx_t *p)
+{
+	rrw_enter(&p->lock, RW_WRITE);
+	p->refs++;
+}
+
+static __inline void
+hammer2_mtx_sh(hammer2_mtx_t *p)
+{
+	rrw_enter(&p->lock, RW_READ);
+	p->refs++;
+}
+
+static __inline void
+hammer2_mtx_unlock(hammer2_mtx_t *p)
+{
+	p->refs--;
+	rrw_exit(&p->lock);
+}
+
+static __inline int
+hammer2_mtx_refs(hammer2_mtx_t *p)
+{
+	return (p->refs);
+}
+
+static __inline void
+hammer2_mtx_destroy(hammer2_mtx_t *p __unused)
+{
+}
 
 /* Non-zero if exclusively locked by the calling thread. */
-#define hammer2_mtx_owned(p)		(rrw_status(&(p)->lock) == RW_WRITE)
+static __inline int
+hammer2_mtx_owned(hammer2_mtx_t *p)
+{
+	return (rrw_status(&p->lock) == RW_WRITE);
+}
 
 /* RW_READ doesn't necessarily mean read locked by calling thread. */
-#define hammer2_mtx_assert_ex(p)	KASSERT(rrw_status(&(p)->lock) == RW_WRITE)
-#define hammer2_mtx_assert_sh(p)	KASSERT(rrw_status(&(p)->lock) == RW_READ)
-#define hammer2_mtx_assert_locked(p)	\
-	KASSERT(rrw_status(&(p)->lock) == RW_READ || rrw_status(&(p)->lock) == RW_WRITE)
-#define hammer2_mtx_assert_unlocked(p)	KASSERT(rrw_status(&(p)->lock) == 0)
+static __inline void
+hammer2_mtx_assert_ex(hammer2_mtx_t *p)
+{
+	KASSERT(rrw_status(&p->lock) == RW_WRITE);
+}
+
+static __inline void
+hammer2_mtx_assert_sh(hammer2_mtx_t *p)
+{
+	KASSERT(rrw_status(&p->lock) == RW_READ);
+}
+
+static __inline void
+hammer2_mtx_assert_locked(hammer2_mtx_t *p)
+{
+	KASSERT(rrw_status(&p->lock) == RW_READ || rrw_status(&p->lock) == RW_WRITE);
+}
+
+static __inline void
+hammer2_mtx_assert_unlocked(hammer2_mtx_t *p)
+{
+	KASSERT(rrw_status(&p->lock) == 0);
+}
 
 static __inline int
 hammer2_mtx_ex_try(hammer2_mtx_t *p)
@@ -150,7 +249,7 @@ hammer2_mtx_sh_try(hammer2_mtx_t *p)
 static __inline int
 hammer2_mtx_upgrade_try(hammer2_mtx_t *p)
 {
-	KASSERT(rrw_status(&(p)->lock) != 0);
+	KASSERT(rrw_status(&p->lock) != 0);
 	if (hammer2_mtx_owned(p))
 		return (0);
 
@@ -181,17 +280,64 @@ hammer2_mtx_temp_restore(hammer2_mtx_t *p, int x)
 
 typedef struct rwlock hammer2_spin_t;
 
-#define hammer2_spin_init(p, s)		rw_init(p, s)
-#define hammer2_spin_ex(p)		rw_enter(p, RW_WRITE)
-#define hammer2_spin_sh(p)		rw_enter(p, RW_READ)
-#define hammer2_spin_unex(p)		rw_exit(p)
-#define hammer2_spin_unsh(p)		rw_exit(p)
-#define hammer2_spin_destroy(p)		do {} while (0)
+static __inline void
+hammer2_spin_init(hammer2_spin_t *p, const char *s)
+{
+	rw_init(p, s);
+}
 
-#define hammer2_spin_assert_ex(p)	rw_assert_wrlock(p)
-#define hammer2_spin_assert_sh(p)	rw_assert_rdlock(p)
-#define hammer2_spin_assert_locked(p)	rw_assert_anylock(p)
-#define hammer2_spin_assert_unlocked(p)	rw_assert_unlocked(p)
+static __inline void
+hammer2_spin_ex(hammer2_spin_t *p)
+{
+	rw_enter(p, RW_WRITE);
+}
+
+static __inline void
+hammer2_spin_sh(hammer2_spin_t *p)
+{
+	rw_enter(p, RW_READ);
+}
+
+static __inline void
+hammer2_spin_unex(hammer2_spin_t *p)
+{
+	rw_exit(p);
+}
+
+static __inline void
+hammer2_spin_unsh(hammer2_spin_t *p)
+{
+	rw_exit(p);
+}
+
+static __inline void
+hammer2_spin_destroy(hammer2_spin_t *p __unused)
+{
+}
+
+static __inline void
+hammer2_spin_assert_ex(hammer2_spin_t *p)
+{
+	rw_assert_wrlock(p);
+}
+
+static __inline void
+hammer2_spin_assert_sh(hammer2_spin_t *p)
+{
+	rw_assert_rdlock(p);
+}
+
+static __inline void
+hammer2_spin_assert_locked(hammer2_spin_t *p)
+{
+	rw_assert_anylock(p);
+}
+
+static __inline void
+hammer2_spin_assert_unlocked(hammer2_spin_t *p)
+{
+	rw_assert_unlocked(p);
+}
 
 extern struct pool hammer2_pool_inode;
 extern struct pool hammer2_pool_xops;

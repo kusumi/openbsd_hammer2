@@ -472,7 +472,7 @@ hammer2_chain_lastdrop(hammer2_chain_t *chain, int depth)
 			hammer2_flush(chain,
 			    HAMMER2_FLUSH_TOP | HAMMER2_FLUSH_ALL);
 			hammer2_mtx_unlock(&chain->lock);
-			return(chain); /* retry drop */
+			return (chain); /* retry drop */
 		}
 
 		/*
