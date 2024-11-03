@@ -49,6 +49,10 @@
 /* Taken from sys/sys/cdefs.h in FreeBSD. */
 #define __DECONST(type, var)	((type)(__uintptr_t)(const void *)(var))
 
+#if 0
+#define HAMMER2_INVARIANTS
+#endif
+
 /* Emulate INVARIANTS in FreeBSD. */
 #if 1
 #define INVARIANTS	DIAGNOSTIC

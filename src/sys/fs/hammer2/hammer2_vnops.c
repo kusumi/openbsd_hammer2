@@ -1754,11 +1754,6 @@ hammer2_remove(void *v)
 	hammer2_trans_done(dip->pmp, HAMMER2_TRANS_SIDEQ);
 out:
 	pool_put(&namei_pool, cnp->cn_pnbuf);
-	if (dvp == vp)
-		vrele(vp);
-	else
-		vput(vp);
-	vput(dvp);
 	return (error);
 }
 

@@ -1,3 +1,10 @@
+v1.2.8
+======
+- Minor fixes
+- Misc updates
+- Add patch/openbsd76.patch
+- Remove patch/openbsd74.patch
+
 v1.2.7
 ======
 - Sync with DragonFly

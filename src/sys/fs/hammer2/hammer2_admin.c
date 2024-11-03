@@ -287,7 +287,7 @@ hammer2_xop_unset_ipdep(hammer2_inode_t *ip)
 	hammer2_lk_unlock(mtx);
 }
 
-#ifdef INVARIANTS
+#ifdef HAMMER2_INVARIANTS
 //#define XOP_ADMIN_DEBUG
 static __inline void
 xop_storage_func(hammer2_xop_head_t *xop, hammer2_inode_t *ip, void *scratch,

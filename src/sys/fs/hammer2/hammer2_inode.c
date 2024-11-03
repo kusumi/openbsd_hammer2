@@ -519,20 +519,6 @@ hammer2_inode_ref(hammer2_inode_t *ip)
 	atomic_add_int(&ip->refs, 1);
 }
 
-static void
-hammer2_inode_drop_assert(hammer2_inode_t *ip)
-{
-	int refs;
-
-	refs = hammer2_mtx_refs(&ip->lock);
-	if (refs) {
-		hprintf("XXX inum %016llx mtx_refs %d mtx_owned %d\n",
-		    (long long)ip->meta.inum, refs,
-		    hammer2_mtx_owned(&ip->lock));
-		KKASSERT(ip->meta.inum == 1); /* XXX2 */
-	}
-}
-
 /*
  * Drop an inode reference, freeing the inode when the last reference goes
  * away.
@@ -561,8 +547,7 @@ hammer2_inode_drop(hammer2_inode_t *ip)
 
 			hammer2_spin_ex(&hash->spin);
 			if (atomic_cmpset_int(&ip->refs, 1, 0)) {
-				//KKASSERT(hammer2_mtx_refs(&ip->lock) == 0);
-				hammer2_inode_drop_assert(ip);
+				KKASSERT(hammer2_mtx_refs(&ip->lock) == 0);
 				if (ip->flags & HAMMER2_INODE_ONHASH) {
 					xipp = &hash->base;
 					while (*xipp != ip)

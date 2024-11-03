@@ -656,7 +656,7 @@ hammer2_ioctl_inode_set(hammer2_inode_t *ip, void *data)
 static int
 hammer2_ioctl_debug_dump(hammer2_inode_t *ip, unsigned int flags)
 {
-#ifdef INVARIANTS
+#ifdef HAMMER2_INVARIANTS
 	hammer2_chain_t *chain;
 	int i;
 
@@ -802,7 +802,7 @@ failed:
 static int
 hammer2_ioctl_destroy(hammer2_inode_t *ip, void *data)
 {
-#ifdef INVARIANTS
+#ifdef HAMMER2_INVARIANTS
 	hammer2_ioc_destroy_t *iocd = data;
 	hammer2_pfs_t *pmp = ip->pmp;
 	int error;

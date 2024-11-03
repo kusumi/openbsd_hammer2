@@ -311,7 +311,7 @@ void
 hammer2_inc_iostat(hammer2_iostat_t *ios, int btype, size_t bytes)
 {
 	hammer2_iostat_unit_t *p = NULL;
-#ifdef INVARIANTS
+#ifdef HAMMER2_INVARIANTS
 	switch (btype) {
 	case HAMMER2_BREF_TYPE_INODE:
 		p = &ios->inode;
