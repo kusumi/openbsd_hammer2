@@ -989,7 +989,7 @@ hammer2_chain_t *hammer2_chain_getparent(hammer2_chain_t *, int);
 hammer2_chain_t *hammer2_chain_lookup(hammer2_chain_t **, hammer2_key_t *,
     hammer2_key_t, hammer2_key_t, int *, int);
 hammer2_chain_t *hammer2_chain_next(hammer2_chain_t **, hammer2_chain_t *,
-    hammer2_key_t *, hammer2_key_t, hammer2_key_t, int *, int);
+    hammer2_key_t *, hammer2_key_t, int *, int);
 int hammer2_chain_scan(hammer2_chain_t *, hammer2_chain_t **,
     hammer2_blockref_t *, int *, int);
 int hammer2_chain_create(hammer2_chain_t **, hammer2_chain_t **,

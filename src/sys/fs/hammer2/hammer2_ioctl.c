@@ -132,7 +132,7 @@ hammer2_ioctl_pfs_get(hammer2_inode_t *ip, void *data)
 			chain = NULL;
 			break;
 		}
-		chain = hammer2_chain_next(&parent, chain, &key_next, key_next,
+		chain = hammer2_chain_next(&parent, chain, &key_next,
 		    HAMMER2_KEY_MAX, &error, HAMMER2_LOOKUP_SHARED);
 	}
 	error = hammer2_error_to_errno(error);
@@ -159,8 +159,7 @@ hammer2_ioctl_pfs_get(hammer2_inode_t *ip, void *data)
 			pfs->name_next = (hammer2_key_t)-1;
 		} else {
 			chain = hammer2_chain_next(&parent, chain, &key_next,
-			    key_next, HAMMER2_KEY_MAX, &error,
-			    HAMMER2_LOOKUP_SHARED);
+			    HAMMER2_KEY_MAX, &error, HAMMER2_LOOKUP_SHARED);
 			if (chain)
 				pfs->name_next = chain->bref.key;
 			else
@@ -218,7 +217,7 @@ hammer2_ioctl_pfs_lookup(hammer2_inode_t *ip, void *data)
 	while (chain) {
 		if (hammer2_chain_dirent_test(chain, pfs->name, len))
 			break;
-		chain = hammer2_chain_next(&parent, chain, &key_next, key_next,
+		chain = hammer2_chain_next(&parent, chain, &key_next,
 		    lhc + HAMMER2_DIRHASH_LOMASK, &error,
 		    HAMMER2_LOOKUP_SHARED);
 	}
@@ -276,6 +275,9 @@ hammer2_ioctl_pfs_create(hammer2_inode_t *ip, void *data)
 
 	if (hammer2_ioctl_pfs_lookup(ip, pfs) == 0)
 		return (EEXIST);
+
+	if (pfs->pfs_type != HAMMER2_PFSTYPE_MASTER)
+		return (EOPNOTSUPP);
 
 	hammer2_trans_init(hmp->spmp, HAMMER2_TRANS_ISFLUSH);
 	mtid = hammer2_trans_sub(hmp->spmp);
@@ -654,7 +656,7 @@ hammer2_ioctl_inode_set(hammer2_inode_t *ip, void *data)
  * Recursively dump chains of a given inode.
  */
 static int
-hammer2_ioctl_debug_dump(hammer2_inode_t *ip, unsigned int flags)
+hammer2_ioctl_debug_dump(hammer2_inode_t *ip, unsigned int flags __unused)
 {
 #ifdef HAMMER2_INVARIANTS
 	hammer2_chain_t *chain;
@@ -1052,6 +1054,41 @@ hammer2_ioctl_volume_list(hammer2_inode_t *ip, void *data)
 	return (error);
 }
 
+/*
+ * Get a list of volumes (version 2).
+ */
+static int
+hammer2_ioctl_volume_list2(hammer2_inode_t *ip, void *data)
+{
+	hammer2_ioc_volume_list2_t *vollist = data;
+	hammer2_ioc_volume2_t *entry;
+	hammer2_volume_t *vol;
+	hammer2_dev_t *hmp = ip->pmp->pfs_hmps[0];
+	int i, error = 0, cnt = 0;
+
+	if (hmp == NULL)
+		return (EINVAL);
+
+	for (i = 0; i < hmp->nvolumes; ++i) {
+		if (cnt >= vollist->nvolumes)
+			break;
+		vol = &hmp->volumes[i];
+		entry = &vollist->volumes[cnt];
+		/* Copy hammer2_volume_t fields. */
+		entry->id = vol->id;
+		bcopy(vol->dev->path, entry->path, sizeof(entry->path));
+		entry->offset = vol->offset;
+		entry->size = vol->size;
+		cnt++;
+	}
+	vollist->nvolumes = cnt;
+	vollist->version = hmp->voldata.version;
+	bcopy(ip->pmp->pfs_names[0], vollist->pfs_name,
+	    sizeof(vollist->pfs_name));
+
+	return (error);
+}
+
 int
 hammer2_ioctl_impl(hammer2_inode_t *ip, unsigned long com, void *data,
     int fflag, struct ucred *cred)
@@ -1100,6 +1137,9 @@ hammer2_ioctl_impl(hammer2_inode_t *ip, unsigned long com, void *data,
 		break;
 	case HAMMER2IOC_VOLUME_LIST:
 		error = hammer2_ioctl_volume_list(ip, data);
+		break;
+	case HAMMER2IOC_VOLUME_LIST2:
+		error = hammer2_ioctl_volume_list2(ip, data);
 		break;
 	default:
 		error = EOPNOTSUPP;

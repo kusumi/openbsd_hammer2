@@ -862,7 +862,7 @@ again:
 		    chain->bytes, &chain->dio);
 	if (error) {
 		hprintf("%s blockref I/O error %d at %016llx\n",
-		    hammer2_breftype_to_str(chain->bref.type), error,
+		    hammer2_breftype_to_str(bref->type), error,
 		    (long long)bref->data_off);
 		chain->error = HAMMER2_ERROR_EIO;
 		hammer2_io_bqrelse(&chain->dio);
@@ -874,7 +874,7 @@ again:
 	 * NOTE: A locked chain's data cannot be modified without first
 	 *	 calling hammer2_chain_modify().
 	 */
-	bdata = hammer2_io_data(chain->dio, chain->bref.data_off);
+	bdata = hammer2_io_data(chain->dio, bref->data_off);
 
 	if (chain->flags & HAMMER2_CHAIN_INITIAL) {
 		/*
@@ -2374,10 +2374,10 @@ done:
  */
 hammer2_chain_t *
 hammer2_chain_next(hammer2_chain_t **parentp, hammer2_chain_t *chain,
-    hammer2_key_t *key_nextp, hammer2_key_t key_beg, hammer2_key_t key_end,
-    int *errorp, int flags)
+    hammer2_key_t *key_nextp, hammer2_key_t key_end, int *errorp, int flags)
 {
 	hammer2_chain_t *parent;
+	hammer2_key_t key_beg;
 	int how_maybe;
 
 	/* Calculate locking flags for upward recursion. */
@@ -4205,7 +4205,7 @@ hammer2_chain_delete_obref(hammer2_chain_t *parent, hammer2_chain_t *chain,
  */
 static int
 hammer2_base_find(hammer2_chain_t *parent, hammer2_blockref_t *base, int count,
-    hammer2_key_t *key_nextp, hammer2_key_t key_beg, hammer2_key_t key_end)
+    hammer2_key_t *key_nextp, hammer2_key_t key_beg)
 {
 	hammer2_blockref_t *scan;
 	hammer2_key_t scan_end;
@@ -4305,7 +4305,7 @@ hammer2_combined_find(hammer2_chain_t *parent, hammer2_blockref_t *base,
 
 	/* Lookup in block array and in rbtree. */
 	*key_nextp = key_end + 1;
-	i = hammer2_base_find(parent, base, count, key_nextp, key_beg, key_end);
+	i = hammer2_base_find(parent, base, count, key_nextp, key_beg);
 	chain = hammer2_chain_find(parent, key_nextp, key_beg, key_end);
 
 	/* Neither matched. */
@@ -4381,8 +4381,7 @@ hammer2_base_delete(hammer2_chain_t *parent, hammer2_blockref_t *base,
 	 *     re-flushed in some cases.
 	 */
 	key_next = 0; /* max range */
-	i = hammer2_base_find(parent, base, count, &key_next, elm->key,
-	    elm->key);
+	i = hammer2_base_find(parent, base, count, &key_next, elm->key);
 	scan = &base[i];
 
 	if (i == count || scan->type == HAMMER2_BREF_TYPE_EMPTY ||
@@ -4487,8 +4486,7 @@ hammer2_base_insert(hammer2_chain_t *parent, hammer2_blockref_t *base,
 	 *     re-flushed in some cases.
 	 */
 	key_next = 0; /* max range */
-	i = hammer2_base_find(parent, base, count, &key_next, elm->key,
-	    elm->key);
+	i = hammer2_base_find(parent, base, count, &key_next, elm->key);
 
 	/*
 	 * Shortcut fill optimization, typical ordered insertion(s) may not
@@ -4779,9 +4777,6 @@ hammer2_chain_inode_find(hammer2_pfs_t *pmp, hammer2_key_t inum, int clindex,
 		hammer2_inode_drop(ip);
 		if (*chainp)
 			return ((*chainp)->error);
-		hammer2_chain_unlock(*chainp);
-		hammer2_chain_drop(*chainp);
-		*chainp = NULL;
 		if (*parentp) {
 			hammer2_chain_unlock(*parentp);
 			hammer2_chain_drop(*parentp);

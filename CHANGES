@@ -1,3 +1,13 @@
+v1.2.9
+======
+- Sync with DragonFly
+- Sync with hammer2-fuse
+- Fix zlib panic
+- Minor fixes
+- Misc updates
+- Add patch/openbsd77.patch
+- Remove patch/openbsd76.patch
+
 v1.2.8
 ======
 - Minor fixes

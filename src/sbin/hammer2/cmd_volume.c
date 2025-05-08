@@ -39,6 +39,28 @@
 #include "hammer2.h"
 
 int
+is_supported_volume_list(const char *f)
+{
+	hammer2_ioc_volume_list_t vollist;
+	int fd, ecode;
+
+	if ((fd = hammer2_ioctl_handle(f)) < 0)
+		return (-1);
+
+	bzero(&vollist, sizeof(vollist));
+	if (ioctl(fd, HAMMER2IOC_VOLUME_LIST, &vollist) < 0) {
+		ecode = errno;
+		close(fd);
+		if (ecode == EOPNOTSUPP)
+			return (0);
+		else
+			return (-1);
+	}
+	close(fd);
+	return (1);
+}
+
+int
 cmd_volume_list(int ac, char **av)
 {
 	hammer2_ioc_volume_list_t vollist;
@@ -83,8 +105,10 @@ cmd_volume_list(int ac, char **av)
 				printf("%s\n", entry->path);
 			}
 		} else {
+			char pfs_name[HAMMER2_INODE_MAXNAME+1];
+			strlcpy(pfs_name, vollist.pfs_name, sizeof(pfs_name));
 			printf("version %d\n", vollist.version);
-			printf("@%s\n", vollist.pfs_name);
+			printf("@%s\n", pfs_name);
 			for (j = 0; j < vollist.nvolumes; ++j) {
 				entry = &vollist.volumes[j];
 				printf("volume%-2d %-*.*s %s",
@@ -101,6 +125,76 @@ cmd_volume_list(int ac, char **av)
 	}
 failed:
 	free(vollist.volumes);
+	if (all)
+		put_hammer2_mounts(ac, av);
+
+	return (ecode);
+}
+
+int
+cmd_volume_list2(int ac, char **av)
+{
+	hammer2_ioc_volume_list2_t vollist;
+	hammer2_ioc_volume2_t *entry;
+	int fd, i, j, n, w, all = 0, ecode = 0;
+
+	if (ac == 1 && av[0] == NULL) {
+		av = get_hammer2_mounts(&ac);
+		all = 1;
+	}
+	bzero(&vollist.volumes, sizeof(vollist.volumes));
+
+	for (i = 0; i < ac; ++i) {
+		if (i)
+			printf("\n");
+		if (ac > 1 || all)
+			printf("%s\n", av[i]);
+		if ((fd = hammer2_ioctl_handle(av[i])) < 0) {
+			ecode = 1;
+			goto failed;
+		}
+
+		vollist.nvolumes = HAMMER2_MAX_VOLUMES;
+		if (ioctl(fd, HAMMER2IOC_VOLUME_LIST2, &vollist) < 0) {
+			perror("ioctl");
+			close(fd);
+			ecode = 1;
+			goto failed;
+		}
+
+		w = 0;
+		for (j = 0; j < vollist.nvolumes; ++j) {
+			entry = &vollist.volumes[j];
+			n = (int)strlen(entry->path);
+			if (n > w)
+				w = n;
+		}
+
+		if (QuietOpt > 0) {
+			for (j = 0; j < vollist.nvolumes; ++j) {
+				entry = &vollist.volumes[j];
+				printf("%s\n", entry->path);
+			}
+		} else {
+			char pfs_name[HAMMER2_INODE_MAXNAME+1];
+			strlcpy(pfs_name, vollist.pfs_name, sizeof(pfs_name));
+			printf("version %d\n", vollist.version);
+			printf("@%s\n", pfs_name);
+			for (j = 0; j < vollist.nvolumes; ++j) {
+				entry = &vollist.volumes[j];
+				printf("volume%-2d %-*.*s %s",
+				       entry->id, w, w, entry->path,
+				       sizetostr(entry->size));
+				if (VerboseOpt > 0)
+					printf(" 0x%016jx 0x%016jx",
+					       (intmax_t)entry->offset,
+					       (intmax_t)entry->size);
+				printf("\n");
+			}
+		}
+		close(fd);
+	}
+failed:
 	if (all)
 		put_hammer2_mounts(ac, av);
 

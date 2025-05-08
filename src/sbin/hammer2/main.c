@@ -318,11 +318,25 @@ main(int ac, char **av)
 		/*
 		 * List all volumes
 		 */
+		int argc;
+		char **argv;
 		if (ac >= 2) {
-			ecode = cmd_volume_list(ac - 1,
-					     (char **)(void *)&av[1]);
+			argc = ac - 1;
+			argv = (char **)(void *)&av[1];
 		} else {
-			ecode = cmd_volume_list(1, &sel_path);
+			argc = 1;
+			argv = &sel_path;
+		}
+		ecode = is_supported_volume_list(argv[0]);
+		switch (ecode) {
+		case 1:
+			ecode = cmd_volume_list(argc, argv);
+			break;
+		case 0:
+			ecode = cmd_volume_list2(argc, argv);
+			break;
+		default:
+			break;
 		}
 	} else if (strcmp(av[0], "setcomp") == 0) {
 		if (ac < 3) {
@@ -438,7 +452,7 @@ usage(int code)
 			"Snapshot without filesystem sync\n"
 		"    stat [<path>...]                  "
 			"Return inode quota & config\n"
-		"    growfs [<path...]                 "
+		"    growfs [<path>...]                "
 			"Grow a filesystem into resized partition\n"
 		"    show <devpath>                    "
 			"Raw hammer2 media dump for topology\n"
@@ -465,7 +479,7 @@ usage(int code)
 		"    printinode <path>                 "
 			"Dump inode\n"
 		"    dumpchain [<path> [<chnflags>]]   "
-			"Dump in-memory chain topology (ONFLUSH flag is 0x200)\n"
+			"Dump in-memory chain topology\n"
 	);
 	exit(code);
 }

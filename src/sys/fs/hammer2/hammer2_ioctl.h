@@ -163,6 +163,27 @@ struct hammer2_ioc_volume_list {
 typedef struct hammer2_ioc_volume_list hammer2_ioc_volume_list_t;
 
 /*
+ * Ioctl to manage volumes (version 2).
+ */
+struct hammer2_ioc_volume2 {
+	char			path[64];
+	int			id;
+	hammer2_off_t		offset;
+	hammer2_off_t		size;
+};
+
+typedef struct hammer2_ioc_volume2 hammer2_ioc_volume2_t;
+
+struct hammer2_ioc_volume_list2 {
+	hammer2_ioc_volume2_t	volumes[HAMMER2_MAX_VOLUMES];
+	int			nvolumes;
+	int			version;
+	char			pfs_name[HAMMER2_INODE_MAXNAME];
+};
+
+typedef struct hammer2_ioc_volume_list2 hammer2_ioc_volume_list2_t;
+
+/*
  * Ioctl list.
  */
 #define HAMMER2IOC_VERSION_GET		_IOWR('h', 64, struct hammer2_ioc_version)
@@ -179,5 +200,6 @@ typedef struct hammer2_ioc_volume_list hammer2_ioc_volume_list_t;
 #define HAMMER2IOC_EMERG_MODE		_IOWR('h', 95, int)
 #define HAMMER2IOC_GROWFS		_IOWR('h', 96, struct hammer2_ioc_growfs)
 #define HAMMER2IOC_VOLUME_LIST		_IOWR('h', 97, struct hammer2_ioc_volume_list)
+#define HAMMER2IOC_VOLUME_LIST2		_IOWR('h', 197, struct hammer2_ioc_volume_list2)
 
 #endif /* !_FS_HAMMER2_IOCTL_H_ */

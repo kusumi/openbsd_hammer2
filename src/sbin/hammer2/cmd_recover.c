@@ -72,6 +72,7 @@
 
 #include <openssl/sha.h>
 
+#if 0
 typedef struct dirent_entry {
 	struct dirent_entry *next;
 	char		*filename;
@@ -79,6 +80,7 @@ typedef struct dirent_entry {
 	hammer2_key_t	inum;
 	hammer2_off_t	bref_off;
 } dirent_entry_t;
+#endif
 
 typedef struct inode_entry {
 	struct inode_entry *next;
@@ -117,7 +119,7 @@ typedef struct topo_inode_entry {
 	inode_entry_t *iscan;
 } topo_inode_entry_t;
 
-static dirent_entry_t **DirHash;
+/*static dirent_entry_t **DirHash;*/
 static inode_entry_t **InodeHash;
 static inode_entry_t **InodeHash2;	/* secondary multi-variable hash */
 static topology_entry_t **TopologyHash;
@@ -188,11 +190,20 @@ cmd_recover(const char *devpath, const char *pathname,
 	hammer2_volume_t *vol;
 	hammer2_off_t loff;
 	hammer2_off_t poff;
+	struct stat st;
 	size_t i;
+
+	if (stat(destdir, &st) == -1) {
+		perror("stat");
+		return 1;
+	} else if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "%s: not a directory\n", destdir);
+		return 1;
+	}
 
 	StrictMode = strict;
 	hammer2_init_volumes(devpath, 1);
-	DirHash = calloc(HTABLE_SIZE, sizeof(dirent_entry_t *));
+	/*DirHash = calloc(HTABLE_SIZE, sizeof(dirent_entry_t *));*/
 	InodeHash = calloc(HTABLE_SIZE, sizeof(inode_entry_t *));
 	InodeHash2 = calloc(HTABLE_SIZE, sizeof(inode_entry_t *));
 	TopologyHash = calloc(HTABLE_SIZE, sizeof(topology_entry_t *));
@@ -223,11 +234,9 @@ cmd_recover(const char *devpath, const char *pathname,
 	while ((vol = hammer2_get_volume(loff)) != NULL) {
 		int fd;
 		int xdisp;
-		hammer2_off_t vol_size;
 
 		fd = vol->fd;
 		poff = loff - vol->offset;
-		vol_size = lseek(fd, 0L, SEEK_END);
 		xdisp = 0;
 
 		while (poff < vol->size) {
@@ -329,7 +338,7 @@ cmd_recover(const char *devpath, const char *pathname,
 				       "media %6.2f/%-3.2fG\r",
 					InodeCount,
 					MediaBytes / 1e9,
-					vol_size / 1e9);
+					hammer2_get_total_size() / 1e9);
 				fflush(stdout);
 			}
 		}
@@ -457,19 +466,19 @@ cmd_recover(const char *devpath, const char *pathname,
 	hammer2_cleanup_volumes();
 
 	for (i = 0; i < HTABLE_SIZE; ++i) {
-		dirent_entry_t *dscan;
+		/*dirent_entry_t *dscan;*/
 		inode_entry_t *iscan;
 		topology_entry_t *top_scan;
 		neg_entry_t *negscan;
 		topo_bref_entry_t *topo_bref;
 		topo_inode_entry_t *topo_inode;
-
+		/*
 		while ((dscan = DirHash[i]) != NULL) {
 			DirHash[i] = dscan->next;
 			free(dscan->filename);
 			free(dscan);
 		}
-
+		*/
 		while ((iscan = InodeHash[i]) != NULL) {
 			InodeHash[i] = iscan->next;
 			free(iscan);
@@ -501,7 +510,7 @@ cmd_recover(const char *devpath, const char *pathname,
 	free(TopoBRefHash);
 	free(NegativeHash);
 	free(TopologyHash);
-	free(DirHash);
+	/*free(DirHash);*/
 	free(InodeHash);
 	free(InodeHash2);
 
@@ -1410,11 +1419,6 @@ dump_file_data(int wfd, hammer2_off_t fsize,
 		vol = hammer2_get_volume(bref->data_off);
 		if (vol == NULL)
 			continue;
-		if (bref->type == HAMMER2_BREF_TYPE_EMPTY ||
-		    bref->data_off == 0)
-		{
-			continue;
-		}
 
 		poff = (bref->data_off - vol->offset) & ~0x1FL;
 		psize = 1 << (bref->data_off & 0x1F);
