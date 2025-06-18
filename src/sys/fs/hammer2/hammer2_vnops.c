@@ -1062,15 +1062,8 @@ hammer2_extend_file(hammer2_inode_t *ip, hammer2_key_t nsize)
 	hammer2_mtx_ex(&ip->lock);
 }
 
-/*
- * While bmap implementation itself works, HAMMER2 needs to force VFS to invoke
- * logical vnode strategy (rather than device vnode strategy) unless compression
- * type is set to none.
- */
-static int use_nop_bmap = 1;
-
-static __inline int
-hammer2_nop_bmap(void *v)
+static int
+hammer2_bmap_impl(void *v)
 {
 	struct vop_bmap_args /* {
 		struct vnode *a_vp;
@@ -1079,17 +1072,48 @@ hammer2_nop_bmap(void *v)
 		daddr_t *a_bnp;
 		int *a_runp;
 	} */ *ap = v;
+	hammer2_xop_bmap_t *xop;
+	hammer2_inode_t *ip = VTOI(ap->a_vp);
+	hammer2_dev_t *hmp = ip->pmp->pfs_hmps[0];
+	hammer2_volume_t *vol;
+	int error;
 
-	if (ap->a_vpp != NULL)
-		*ap->a_vpp = ap->a_vp;
-	if (ap->a_bnp != NULL)
-		*ap->a_bnp = ap->a_bn;
+	if (ap->a_bnp == NULL)
+		return (0);
 	if (ap->a_runp != NULL)
-		*ap->a_runp = 0;
+		*ap->a_runp = 0; /* unsupported */
 
-	return (0);
+	xop = hammer2_xop_alloc(ip, 0);
+	xop->lbn = ap->a_bn;
+	hammer2_xop_start(&xop->head, &hammer2_bmap_desc);
+	error = hammer2_xop_collect(&xop->head, 0);
+	error = hammer2_error_to_errno(error);
+	if (error) {
+		if (error == ENOENT)
+			error = 0; /* sparse */
+		if (ap->a_vpp)
+			*ap->a_vpp = NULL;
+		*ap->a_bnp = -1;
+	} else {
+		KKASSERT(xop->offset != HAMMER2_OFF_MASK);
+		if (ap->a_vpp) {
+			vol = hammer2_get_volume(hmp, xop->offset);
+			KKASSERT(vol);
+			KKASSERT(vol->dev);
+			KKASSERT(vol->dev->devvp);
+			*ap->a_vpp = vol->dev->devvp;
+		}
+		*ap->a_bnp = xop->offset / DEV_BSIZE; /* XXX radix bits */
+	}
+	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+
+	return (error);
 }
 
+/*
+ * HAMMER2 needs to force VFS to invoke logical vnode strategy
+ * (not device vnode strategy).
+ */
 static int
 hammer2_bmap(void *v)
 {
@@ -1100,58 +1124,23 @@ hammer2_bmap(void *v)
 		daddr_t *a_bnp;
 		int *a_runp;
 	} */ *ap = v;
-	hammer2_xop_bmap_t *xop;
-	hammer2_dev_t *hmp;
 	hammer2_inode_t *ip = VTOI(ap->a_vp);
-	hammer2_volume_t *vol;
-	int error;
 
-	if (use_nop_bmap)
-		return (hammer2_nop_bmap(v));
+	/*
+	 * XXX struct vop_bmap_args in OpenBSD doesn't have ap->a_cmd to
+	 * distinct VOP_BMAP for seek from others.
+	 */
+	if (ip->in_seek)
+		return (hammer2_bmap_impl(ap));
 
-	hmp = ip->pmp->pfs_hmps[0];
-	if (ap->a_bnp == NULL)
-		return (0);
-	if (ap->a_runp != NULL)
-		*ap->a_runp = 0; /* unsupported */
-
-	/* Initialize with error or nonexistent case first. */
 	if (ap->a_vpp != NULL)
-		*ap->a_vpp = NULL;
+		*ap->a_vpp = ap->a_vp;
 	if (ap->a_bnp != NULL)
-		*ap->a_bnp = -1;
+		*ap->a_bnp = ap->a_bn;
+	if (ap->a_runp != NULL)
+		*ap->a_runp = 0;
 
-	xop = hammer2_xop_alloc(ip, 0);
-	xop->lbn = ap->a_bn; /* logical block number */
-	hammer2_xop_start(&xop->head, &hammer2_bmap_desc);
-	error = hammer2_xop_collect(&xop->head, 0);
-	error = hammer2_error_to_errno(error);
-	if (error) {
-		/* No physical block assigned. */
-		if (error == ENOENT)
-			error = 0;
-		goto done;
-	}
-
-	if (xop->offset != HAMMER2_OFF_MASK) {
-		/* Get volume from the result offset. */
-		KKASSERT((xop->offset & HAMMER2_OFF_MASK_RADIX) == 0);
-		vol = hammer2_get_volume(hmp, xop->offset);
-		KKASSERT(vol);
-		KKASSERT(vol->dev);
-		KKASSERT(vol->dev->devvp);
-
-		/* Return devvp for this volume. */
-		if (ap->a_vpp != NULL)
-			*ap->a_vpp = vol->dev->devvp;
-		/* Return physical block number within devvp. */
-		if (ap->a_bnp != NULL)
-			*ap->a_bnp = (xop->offset - vol->offset) / DEV_BSIZE;
-	}
-done:
-	hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
-
-	return (error);
+	return (0);
 }
 
 static int
@@ -2232,7 +2221,6 @@ hammer2_ioctl(void *v)
 		struct proc *a_p;
 	} */ *ap = v;
 	struct vnode *vp = ap->a_vp;
-	hammer2_inode_t *ip = VTOI(vp);
 	int error;
 
 	/*
@@ -2241,7 +2229,7 @@ hammer2_ioctl(void *v)
 	 */
 	error = 0; /* vn_lock(vp, LK_EXCLUSIVE); */
 	if (error == 0) {
-		error = hammer2_ioctl_impl(ip, ap->a_command, ap->a_data,
+		error = hammer2_ioctl_impl(vp, ap->a_command, ap->a_data,
 		    ap->a_fflag, ap->a_cred);
 		/* VOP_UNLOCK(vp); */
 	} else {

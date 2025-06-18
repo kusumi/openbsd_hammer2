@@ -461,6 +461,7 @@ struct hammer2_inode {
 	uint8_t			comp_heuristic;
 	int			ipdep_idx;
 	int			vhold;
+	int			in_seek;	/* FIOSEEKXXX */
 };
 
 /*
@@ -1096,7 +1097,7 @@ void hammer2_io_dedup_delete(hammer2_dev_t *, uint8_t, hammer2_off_t,
 void hammer2_io_dedup_assert(hammer2_dev_t *, hammer2_off_t, unsigned int);
 
 /* hammer2_ioctl.c */
-int hammer2_ioctl_impl(hammer2_inode_t *, unsigned long, void *, int,
+int hammer2_ioctl_impl(struct vnode *, unsigned long, void *, int,
     struct ucred *);
 
 /* hammer2_ondisk.c */
