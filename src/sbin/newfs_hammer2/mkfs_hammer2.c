@@ -393,7 +393,7 @@ format_hammer2_inode(hammer2_volume_t *vol, hammer2_mkfs_options_t *opt,
 		rawip->meta.version = HAMMER2_INODE_VERSION_ONE;
 		rawip->meta.ctime = now;
 		rawip->meta.mtime = now;
-		/* rawip->atime = now; NOT IMPL MUST BE ZERO */
+		rawip->meta.atime = now;
 		rawip->meta.btime = now;
 		rawip->meta.type = HAMMER2_OBJTYPE_DIRECTORY;
 		rawip->meta.mode = 0755;
@@ -472,7 +472,7 @@ format_hammer2_inode(hammer2_volume_t *vol, hammer2_mkfs_options_t *opt,
 	rawip->meta.version = HAMMER2_INODE_VERSION_ONE;
 	rawip->meta.ctime = now;
 	rawip->meta.mtime = now;
-	/* rawip->meta.atime = now; NOT IMPL MUST BE ZERO */
+	rawip->meta.atime = now;
 	rawip->meta.btime = now;
 	rawip->meta.type = HAMMER2_OBJTYPE_DIRECTORY;
 	rawip->meta.mode = 0700;	/* super-root - root only */
