@@ -256,9 +256,8 @@ hammer2_access(void *v)
 		return (EPERM);
 
 	return (vaccess(vp->v_type, ip->meta.mode & ALLPERMS,
-	    hammer2_to_unix_xid(&ip->meta.uid),
-	    hammer2_to_unix_xid(&ip->meta.gid),
-	    ap->a_mode, ap->a_cred));
+	    hammer2_inode_to_uid(ip), hammer2_inode_to_gid(ip), ap->a_mode,
+	    ap->a_cred));
 }
 
 static int
@@ -279,8 +278,8 @@ hammer2_getattr(void *v)
 	vap->va_fileid = ip->meta.inum;
 	vap->va_mode = ip->meta.mode & ~S_IFMT;
 	vap->va_nlink = ip->meta.nlinks;
-	vap->va_uid = hammer2_to_unix_xid(&ip->meta.uid);
-	vap->va_gid = hammer2_to_unix_xid(&ip->meta.gid);
+	vap->va_uid = hammer2_inode_to_uid(ip);
+	vap->va_gid = hammer2_inode_to_gid(ip);
 	vap->va_rdev = NODEV;
 	vap->va_size = ip->meta.size;
 	vap->va_flags = ip->meta.uflags;
@@ -314,15 +313,16 @@ hammer2_chown(struct vnode *vp, uid_t uid, gid_t gid, struct ucred *cred)
 {
 	hammer2_inode_t *ip = VTOI(vp);
 	struct uuid uuid_uid, uuid_gid;
-	uid_t ouid, ogid;
+	uid_t ouid;
+	gid_t ogid;
 	uint64_t ctime;
 	uint32_t imode;
 	int error;
 
 	hammer2_mtx_assert_ex(&ip->lock);
 
-	ouid = hammer2_to_unix_xid(&ip->meta.uid);
-	ogid = hammer2_to_unix_xid(&ip->meta.gid);
+	ouid = hammer2_inode_to_uid(ip);
+	ogid = hammer2_inode_to_gid(ip);
 
 	if (uid == (uid_t)VNOVAL)
 		uid = ouid;
@@ -367,7 +367,7 @@ hammer2_chmod(struct vnode *vp, mode_t mode, struct ucred *cred)
 
 	hammer2_mtx_assert_ex(&ip->lock);
 
-	if (cred->cr_uid != hammer2_to_unix_xid(&ip->meta.uid) &&
+	if (cred->cr_uid != hammer2_inode_to_uid(ip) &&
 	    (error = suser_ucred(cred)))
 		return (error);
 	if (cred->cr_uid) {
@@ -375,7 +375,7 @@ hammer2_chmod(struct vnode *vp, mode_t mode, struct ucred *cred)
 			error = EFTYPE;
 			return (error);
 		}
-		if (!groupmember(hammer2_to_unix_xid(&ip->meta.gid), cred) &&
+		if (!groupmember(hammer2_inode_to_gid(ip), cred) &&
 		    (mode & S_ISGID)) {
 			error = EPERM;
 			return (error);
@@ -446,7 +446,7 @@ hammer2_setattr(void *v)
 			error = EROFS;
 			goto done;
 		}
-		if (cred->cr_uid != hammer2_to_unix_xid(&ip->meta.uid) &&
+		if (cred->cr_uid != hammer2_inode_to_uid(ip) &&
 		    (error = suser_ucred(cred)))
 			goto done;
 		if (ip->meta.uflags != vap->va_flags) {
@@ -518,7 +518,7 @@ hammer2_setattr(void *v)
 			error = EROFS;
 			goto done;
 		}
-		if (cred->cr_uid != hammer2_to_unix_xid(&ip->meta.uid) &&
+		if (cred->cr_uid != hammer2_inode_to_uid(ip) &&
 		    (error = suser_ucred(cred)) &&
 		    ((vap->va_vaflags & VA_UTIMES_NULL) == 0 ||
 		    (error = VOP_ACCESS(vp, VWRITE, cred, ap->a_p))))
@@ -1241,7 +1241,7 @@ hammer2_bmap(void *v)
 }
 
 static int
-hammer2_nresolve(void *v)
+hammer2_lookup(void *v)
 {
 	struct vop_lookup_args /* {
 		struct vnode *a_dvp;
@@ -1349,8 +1349,8 @@ hammer2_nresolve(void *v)
 				 */
 				if ((dip->meta.mode & S_ISVTX) &&
 				    cred->cr_uid != 0 &&
-				    cred->cr_uid != hammer2_to_unix_xid(&dip->meta.uid) &&
-				    hammer2_to_unix_xid(&ip->meta.uid) != cred->cr_uid) {
+				    cred->cr_uid != hammer2_inode_to_uid(dip) &&
+				    hammer2_inode_to_uid(ip) != cred->cr_uid) {
 					error = EPERM;
 					vput(vp);
 					hammer2_inode_unlock(ip);
@@ -1874,6 +1874,16 @@ out:
 	return (error);
 }
 
+/*
+ * On entry:
+ *	source's parent directory is unlocked
+ *	source file or directory is unlocked
+ *	destination's parent directory is locked
+ *	destination file or directory is locked if it exists
+ *
+ * On exit:
+ *	all vnodes should be released
+ */
 static int
 hammer2_rename(void *v)
 {
@@ -1894,28 +1904,28 @@ hammer2_rename(void *v)
 	hammer2_inode_t *fdip = VTOI(fdvp); /* source directory */
 	hammer2_inode_t *fip = VTOI(fvp); /* file being renamed */
 	hammer2_inode_t *tdip = VTOI(tdvp); /* target directory */
-	hammer2_inode_t *tip; /* replaced target during rename or NULL */
+	hammer2_inode_t *tip = tvp ? VTOI(tvp) : NULL; /* replaced target during rename */
 	hammer2_inode_t *ip1, *ip2, *ip3, *ip4;
 	hammer2_xop_scanlhc_t *sxop;
 	hammer2_xop_nrename_t *xop4;
 	hammer2_key_t tlhc, lhcbase;
 	uint64_t mtime;
-	int error, update_fdip = 0, update_tdip = 0;
+	int error, update_fdip = 0, update_tdip = 0, doingdirectory = 0;
 
 	KKASSERT(fdvp == tdvp || VOP_ISLOCKED(fdvp) == 0);
 	KKASSERT(VOP_ISLOCKED(fvp) == 0);
 	KKASSERT(VOP_ISLOCKED(tdvp) == LK_EXCLUSIVE);
 	KKASSERT(tvp == NULL || VOP_ISLOCKED(tvp) == LK_EXCLUSIVE);
+	KKASSERT(tdvp != tvp); /* really ? */
 
 	/* Check for cross-device rename. */
-	if (fdvp->v_mount != fvp->v_mount || fvp->v_mount != tdvp->v_mount ||
-	    tdvp->v_mount != fdvp->v_mount ||
+	if ((fvp->v_mount != tdvp->v_mount) ||
 	    (tvp && (fvp->v_mount != tvp->v_mount))) {
 		error = EXDEV;
 		goto abortit;
 	}
 
-	if (tvp && ((VTOI(tvp)->meta.uflags & (IMMUTABLE | APPEND)) ||
+	if (tip && ((tip->meta.uflags & (IMMUTABLE | APPEND)) ||
 	    (tdip->meta.uflags & APPEND))) {
 		error = EPERM;
 		goto abortit;
@@ -1932,29 +1942,124 @@ hammer2_rename(void *v)
 	}
 
 	/*
-	 * Renaming a file to itself has no effect.  The upper layers should
-	 * not call us in that case.
+	 * If directory is "sticky", then user must own
+	 * the directory, or the file in it, else she
+	 * may not delete it (unless she's root). This
+	 * implements append-only directories.
+	 */
+	if ((fdip->meta.mode & S_ISVTX) && fcnp->cn_cred->cr_uid != 0 &&
+	    fcnp->cn_cred->cr_uid != hammer2_inode_to_uid(fdip) &&
+	    hammer2_inode_to_uid(fip) != fcnp->cn_cred->cr_uid) {
+		error = EPERM;
+		goto abortit;
+	}
+
+	/*
+	 * If the parent directory is "sticky", then the user must
+	 * own the parent directory, or the destination of the rename,
+	 * otherwise the destination may not be changed (except by
+	 * root). This implements append-only directories.
+	 */
+	if (tip && (tdip->meta.mode & S_ISTXT) && tcnp->cn_cred->cr_uid != 0 &&
+	    tcnp->cn_cred->cr_uid != hammer2_inode_to_uid(tdip) &&
+	    hammer2_inode_to_uid(tip) != tcnp->cn_cred->cr_uid &&
+	    !vnoperm(tdvp)) {
+		error = EPERM;
+		goto abortit;
+	}
+#if 0
+	/*
+	 * If source and dest are the same, do nothing.
 	 */
 	if (tvp == fvp) {
 		error = 0;
 		goto abortit;
 	}
-
+#else
+	/*
+	 * Check if just deleting a link name or if we've lost a race.
+	 * If another process completes the same rename after we've looked
+	 * up the source and have blocked looking up the target, then the
+	 * source and target inodes may be identical now although the
+	 * names were never linked.
+	 */
+	if (fvp == tvp) {
+		if (fvp->v_type == VDIR) {
+			/*
+			 * Linked directories are impossible, so we must
+			 * have lost the race.  Pretend that the rename
+			 * completed before the lookup.
+			 */
+			error = ENOENT;
+			goto abortit;
+		}
+		/* Release destination completely. */
+		VOP_ABORTOP(tdvp, tcnp);
+		vput(tdvp);
+		vput(tvp);
+		/*
+		 * Delete source.  There is another race now that everything
+		 * is unlocked, but this doesn't cause any new complications.
+		 * relookup() may find a file that is unrelated to the
+		 * original one, or it may fail.  Too bad.
+		 */
+		vrele(fvp);
+		fcnp->cn_flags &= ~MODMASK;
+		fcnp->cn_flags |= LOCKPARENT | LOCKLEAF;
+		if ((fcnp->cn_flags & SAVESTART) == 0)
+			panic("ufs_rename: lost from startdir");
+		fcnp->cn_nameiop = DELETE;
+		if ((error = vfs_relookup(fdvp, &fvp, fcnp)) != 0)
+			return (error); /* relookup did vrele() */
+		vrele(fdvp);
+		return (VOP_REMOVE(fdvp, fvp, fcnp));
+	}
+#endif
+	if (fdvp != tdvp) {
+		error = vn_lock(fdvp, LK_EXCLUSIVE);
+		if (error)
+			goto abortit;
+		/* fdvp, tdvp, tvp now locked */
+	}
 	error = vn_lock(fvp, LK_EXCLUSIVE);
-	if (error)
+	if (error) {
+		if (fdvp != tdvp)
+			VOP_UNLOCK(fdvp);
 		goto abortit;
+	}
+	/* fdvp, fvp, tdvp, tvp now locked */
 	if ((fip->meta.uflags & (IMMUTABLE | APPEND)) ||
 	    (fdip->meta.uflags & APPEND)) {
+		if (fdvp != tdvp)
+			VOP_UNLOCK(fdvp);
 		VOP_UNLOCK(fvp);
 		error = EPERM;
 		goto abortit;
 	}
-	if (fdvp != tdvp) {
-		error = vn_lock(fdvp, LK_EXCLUSIVE);
+	if (fip->meta.type == HAMMER2_OBJTYPE_DIRECTORY) {
+		error = VOP_ACCESS(fvp, VWRITE, tcnp->cn_cred, tcnp->cn_proc);
+		if (error == 0 && tvp)
+			error = VOP_ACCESS(tvp, VWRITE, tcnp->cn_cred,
+			    tcnp->cn_proc);
 		if (error) {
+			if (fdvp != tdvp)
+				VOP_UNLOCK(fdvp);
 			VOP_UNLOCK(fvp);
+			error = EACCES;
 			goto abortit;
 		}
+		/* Avoid ".", "..", and aliases of "." for obvious reasons. */
+		if ((fcnp->cn_namelen == 1 && fcnp->cn_nameptr[0] == '.') ||
+		    fdip == fip ||
+		    (fcnp->cn_flags & ISDOTDOT) ||
+		    (tcnp->cn_flags & ISDOTDOT)) {
+			if (fdvp != tdvp)
+				VOP_UNLOCK(fdvp);
+			VOP_UNLOCK(fvp);
+			error = EINVAL;
+			goto abortit;
+		}
+		doingdirectory = 1;
 	}
 
 	/*
@@ -1963,11 +2068,25 @@ hammer2_rename(void *v)
 	 * directory hierarchy above the target, as this would
 	 * orphan everything below the source directory. Also
 	 * the user must have write permission in the source so
-	 * as to be able to change "..". We must repeat the call
-	 * to namei, as the parent directory is unlocked by the
-	 * call to checkpath().
+	 * as to be able to change "..".
 	 */
-	/* XXX DragonFly does this in VFS. */
+	/* DragonFly does this in VFS. */
+	if (doingdirectory && fdip->meta.inum != tdip->meta.inum) {
+		error = VOP_ACCESS(fvp, VWRITE, tcnp->cn_cred, tcnp->cn_proc);
+		if (error) {
+			if (fdvp != tdvp)
+				VOP_UNLOCK(fdvp);
+			VOP_UNLOCK(fvp);
+			goto abortit;
+		}
+		error = hammer2_checkpath(fip, tdip);
+		if (error) {
+			if (fdvp != tdvp)
+				VOP_UNLOCK(fdvp);
+			VOP_UNLOCK(fvp);
+			goto abortit;
+		}
+	}
 
 	hammer2_trans_init(tdip->pmp, 0);
 	hammer2_inode_ref(fip); /* extra ref */
@@ -1978,7 +2097,6 @@ hammer2_rename(void *v)
 	 * temporarily, the operating system is expected to protect
 	 * against rename races.
 	 */
-	tip = tvp ? VTOI(tvp) : NULL;
 	if (tip)
 		hammer2_inode_ref(tip); /* extra ref */
 
@@ -2118,12 +2236,8 @@ done2:
 		vrele(fdvp);
 	vput(fvp);
 	vput(tdvp);
-	if (tvp != NULL) {
-		if (tvp != tdvp)
-			vput(tvp);
-		else /* how ? */
-			vrele(tvp);
-	}
+	if (tvp)
+		vput(tvp);
 	return (error);
 abortit:
 	VOP_ABORTOP(fdvp, fcnp);
@@ -2131,12 +2245,8 @@ abortit:
 	vrele(fvp);
 	VOP_ABORTOP(tdvp, tcnp);
 	vput(tdvp);
-	if (tvp != NULL) {
-		if (tvp != tdvp)
-			vput(tvp);
-		else /* how ? */
-			vrele(tvp);
-	}
+	if (tvp)
+		vput(tvp);
 	return (error);
 }
 
@@ -2365,25 +2475,9 @@ hammer2_open(void *v)
 	return (0);
 }
 
-static void
-hammer2_itimes_locked(struct vnode *vp)
-{
-}
-
 static int
 hammer2_close(void *v)
 {
-	struct vop_close_args /* {
-		struct vnode *a_vp;
-		int a_fflag;
-		struct ucred *a_cred;
-		struct proc *a_p;
-	} */ *ap = v;
-	struct vnode *vp = ap->a_vp;
-
-	if (vp->v_usecount > 1)
-		hammer2_itimes_locked(vp);
-
 	return (0);
 }
 
@@ -2691,7 +2785,7 @@ hammer2_vinit(struct mount *mp, struct vnode **vpp)
 
 /* Global vfs data structures for hammer2. */
 const struct vops hammer2_vops = {
-	.vop_lookup	= hammer2_nresolve,
+	.vop_lookup	= hammer2_lookup,
 	.vop_create	= hammer2_create,
 	.vop_mknod	= hammer2_mknod,
 	.vop_open	= hammer2_open,

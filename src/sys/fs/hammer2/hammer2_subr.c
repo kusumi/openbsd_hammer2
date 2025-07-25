@@ -412,3 +412,38 @@ hammer2_breftype_to_str(uint8_t type)
 		return ("unknown");
 	}
 }
+
+uid_t
+hammer2_inode_to_uid(const hammer2_inode_t *ip)
+{
+	return (hammer2_to_unix_xid(&ip->meta.uid));
+}
+
+gid_t
+hammer2_inode_to_gid(const hammer2_inode_t *ip)
+{
+	return (hammer2_to_unix_xid(&ip->meta.gid));
+}
+
+static int32_t
+makeudev(int x, int y)
+{
+	if ((x & 0xffffff00) || (y & 0x0000ff00))
+		return (-1);
+	return ((x << 8) | y);
+}
+
+int
+hammer2_getnewfsid(struct mount *mp)
+{
+	const char *buf = mp->mnt_stat.f_mntonname;
+
+	if (!buf)
+		return (-1);
+
+	mp->mnt_stat.f_fsid.val[0] = makeudev(255,
+	    iscsi_crc32(buf, strlen(buf)) & ~makeudev(255, 0));
+	mp->mnt_stat.f_fsid.val[1] = mp->mnt_vfc->vfc_typenum;
+
+	return (0);
+}

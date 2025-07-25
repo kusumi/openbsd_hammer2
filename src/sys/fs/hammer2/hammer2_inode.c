@@ -52,7 +52,7 @@ hammer2_inum_hash_init(hammer2_pfs_t *pmp)
 
 	for (i = 0; i < HAMMER2_INUMHASH_SIZE; ++i) {
 		hash = &pmp->inumhash[i];
-		hammer2_spin_init(&hash->spin, "h2pmp_hasp");
+		hammer2_spin_init(&hash->spin, "h2mp_inum");
 	}
 }
 
@@ -749,7 +749,7 @@ again:
 	 */
 	nip = pool_get(&hammer2_pool_inode, PR_WAITOK | PR_ZERO);
 	atomic_add_int(&hammer2_count_inode_allocated, 1);
-	hammer2_spin_init(&nip->cluster_spin, "h2ip_clsp");
+	hammer2_spin_init(&nip->cluster_spin, "h2ip_cl");
 
 	nip->cluster.pmp = pmp;
 	if (xop) {
@@ -774,9 +774,9 @@ again:
 	 * requires recursive lock.
 	 */
 	nip->refs = 1;
-	hammer2_mtx_init_recurse(&nip->lock, "h2ip_lk");
-	hammer2_mtx_init(&nip->truncate_lock, "h2ip_trlk");
-	hammer2_mtx_init(&nip->vhold_lock, "h2ip_vhlk");
+	hammer2_mtx_init_recurse(&nip->lock, "h2ip");
+	hammer2_mtx_init(&nip->truncate_lock, "h2ip_tr");
+	hammer2_mtx_init(&nip->vhold_lock, "h2ip_vh");
 	rrw_init_flags(&nip->vnlock, "h2vn_lk", RWL_DUPOK | RWL_IS_VNODE);
 	hammer2_mtx_ex(&nip->lock);
 	TAILQ_INIT(&nip->depend_static.sideq);
@@ -982,21 +982,15 @@ hammer2_inode_create_normal(hammer2_inode_t *pip, struct vattr *vap,
 	nip->meta.mode = vap->va_mode;
 	nip->meta.nlinks = nip->meta.type == HAMMER2_OBJTYPE_DIRECTORY ? 2 : 1;
 	if ((nip->meta.mode & S_ISGID) &&
-	    !groupmember(hammer2_to_unix_xid(&nip->meta.gid), cred) &&
+	    !groupmember(hammer2_inode_to_gid(nip), cred) &&
 	    suser_ucred(cred))
 		nip->meta.mode &= ~S_ISGID;
 
-	/* if (vap->va_vaflags & VA_UID_UUID_VALID)
-		nip->meta.uid = vap->va_uid_uuid;
-	else */
 	if (vap->va_uid != (uid_t)VNOVAL)
 		hammer2_guid_to_uuid(&nip->meta.uid, vap->va_uid);
 	else
 		hammer2_guid_to_uuid(&nip->meta.uid, cred->cr_uid);
 
-	/* if (vap->va_vaflags & VA_GID_UUID_VALID)
-		nip->meta.gid = vap->va_gid_uuid;
-	else */
 	if (vap->va_gid != (gid_t)VNOVAL)
 		hammer2_guid_to_uuid(&nip->meta.gid, vap->va_gid);
 	else
@@ -1581,4 +1575,88 @@ hammer2_inode_chain_flush(hammer2_inode_t *ip, int flags)
 		error = 0;
 
 	return (error);
+}
+
+/*
+ * Check if source directory is in the path of the target directory.
+ */
+int
+hammer2_checkpath(const hammer2_inode_t *dip, hammer2_inode_t *tdip)
+{
+	hammer2_xop_lookup_t *xop;
+	hammer2_chain_t *chain;
+	hammer2_inode_t *ip;
+	const hammer2_inode_data_t *ipdata;
+	hammer2_tid_t inum = tdip->meta.inum;
+	int error;
+
+	KKASSERT(dip != tdip);
+	KKASSERT(dip->meta.type == HAMMER2_OBJTYPE_DIRECTORY);
+	KKASSERT(tdip->meta.type == HAMMER2_OBJTYPE_DIRECTORY);
+
+	while (inum != 1) {
+		if (inum == tdip->meta.inum) {
+			ip = tdip;
+			hammer2_inode_ref(ip);
+		} else {
+			ip = hammer2_inode_lookup(dip->pmp, inum);
+		}
+		if (ip) {
+			if (dip->meta.inum == ip->meta.iparent) {
+				hammer2_inode_drop(ip);
+				return (EINVAL);
+			}
+			inum = ip->meta.iparent;
+			hammer2_inode_drop(ip);
+			ip = NULL;
+			continue;
+		}
+		if (inum == tdip->meta.inum) {
+			chain = hammer2_inode_chain(tdip, 0,
+			    HAMMER2_RESOLVE_ALWAYS | HAMMER2_RESOLVE_SHARED);
+			if (chain) {
+				ipdata = &chain->data->ipdata;
+				if (dip->meta.inum == ipdata->meta.iparent) {
+					hammer2_chain_unlock(chain);
+					hammer2_chain_drop(chain);
+					return (EINVAL);
+				}
+				inum = ipdata->meta.iparent;
+				hammer2_chain_unlock(chain);
+				hammer2_chain_drop(chain);
+			} else {
+				return (EIO);
+			}
+		} else {
+			xop = hammer2_xop_alloc(dip->pmp->iroot, 0);
+			xop->lhc = inum;
+			hammer2_xop_start(&xop->head, &hammer2_lookup_desc);
+			error = hammer2_xop_collect(&xop->head, 0);
+			if (error == 0) {
+				ipdata = &hammer2_xop_gdata(&xop->head)->ipdata;
+				if (dip->meta.inum == ipdata->meta.iparent) {
+					hammer2_xop_pdata(&xop->head);
+					hammer2_xop_retire(&xop->head,
+					    HAMMER2_XOPMASK_VOP);
+					return (EINVAL);
+				}
+				inum = ipdata->meta.iparent;
+				hammer2_xop_pdata(&xop->head);
+			}
+			hammer2_xop_retire(&xop->head, HAMMER2_XOPMASK_VOP);
+			if (error) {
+				error = hammer2_error_to_errno(error);
+				switch (error) {
+				case ENOENT:
+					hprintf("inum %016llx chain not found\n",
+					    (long long)inum);
+					return (0); /* XXX not synced yet */
+				default:
+					return (error);
+				}
+			}
+		}
+	}
+
+	return (0);
 }

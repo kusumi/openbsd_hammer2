@@ -169,7 +169,7 @@ hammer2_init(struct vfsconf *vfsp)
 	pool_init(&hammer2_pool_xops, sizeof(hammer2_xop_t), 0,
 	    IPL_NONE, PR_WAITOK, "h2xopspool", NULL);
 
-	hammer2_lk_init(&hammer2_mntlk, "h2mntlk");
+	hammer2_lk_init(&hammer2_mntlk, "h2_mnt");
 
 	TAILQ_INIT(&hammer2_mntlist);
 	TAILQ_INIT(&hammer2_pfslist);
@@ -224,14 +224,14 @@ hammer2_pfsalloc(hammer2_chain_t *chain, const hammer2_inode_data_t *ripdata,
 		pmp = hmalloc(sizeof(*pmp), M_HAMMER2, M_WAITOK | M_ZERO);
 		pmp->force_local = force_local;
 		hammer2_trans_manage_init(pmp);
-		hammer2_spin_init(&pmp->blockset_spin, "h2pmp_bssp");
-		hammer2_spin_init(&pmp->list_spin, "h2pmp_lssp");
+		hammer2_spin_init(&pmp->blockset_spin, "h2mp_bset");
+		hammer2_spin_init(&pmp->list_spin, "h2mp_list");
 		for (i = 0; i < HAMMER2_IHASH_SIZE; i++) {
-			hammer2_lk_init(&pmp->xop_lock[i], "h2pmp_xoplk");
-			hammer2_lkc_init(&pmp->xop_cv[i], "h2pmp_xoplkc");
+			hammer2_lk_init(&pmp->xop_lock[i], "h2mp_xop");
+			hammer2_lkc_init(&pmp->xop_cv[i], "h2mp_xop_cv");
 		}
-		hammer2_lk_init(&pmp->trans_lock, "h2pmp_trlk");
-		hammer2_lkc_init(&pmp->trans_cv, "h2pmp_trlkc");
+		hammer2_lk_init(&pmp->trans_lock, "h2mp_tx");
+		hammer2_lkc_init(&pmp->trans_cv, "h2mp_tx_cv");
 		TAILQ_INIT(&pmp->syncq);
 		TAILQ_INIT(&pmp->depq);
 		hammer2_inum_hash_init(pmp);
@@ -494,7 +494,6 @@ static int
 hammer2_mount(struct mount *mp, const char *path, void *data,
     struct nameidata *ndp, struct proc *p)
 {
-	dev_t dev;
 	struct hammer2_mount_info *args = data;
 	hammer2_dev_t *hmp = NULL, *hmp_tmp, *force_local;
 	hammer2_pfs_t *pmp = NULL, *spmp;
@@ -709,12 +708,12 @@ next_hmp:
 		hmp->hflags = args->hflags & HMNT2_DEVFLAGS;
 
 		TAILQ_INSERT_TAIL(&hammer2_mntlist, hmp, mntentry);
-		hammer2_mtx_init(&hmp->iohash_lock, "h2hmp_iohlk");
+		hammer2_mtx_init(&hmp->iohash_lock, "h2dev_iohash");
 		hammer2_io_hash_init(hmp);
 
-		hammer2_lk_init(&hmp->vollk, "h2vol");
-		hammer2_lk_init(&hmp->bulklk, "h2bulk");
-		hammer2_lk_init(&hmp->bflk, "h2bflk");
+		hammer2_lk_init(&hmp->vollk, "h2dev_vol");
+		hammer2_lk_init(&hmp->bulklk, "h2dev_bulk");
+		hammer2_lk_init(&hmp->bflk, "h2dev_bf");
 
 		/*
 		 * vchain setup.  vchain.data is embedded.
@@ -960,15 +959,13 @@ next_hmp:
 		return (EBUSY);
 	}
 
-	/*
-	 * dev alone isn't unique to PFS, but pfs_clid isn't either against
-	 * multiple mounts with the same image.
-	 */
-	KKASSERT(!TAILQ_EMPTY(&hmp->devvp_list));
-	dev = TAILQ_FIRST(&hmp->devvp_list)->devvp->v_rdev;
-	mp->mnt_stat.f_fsid.val[0] = ((long)dev) ^
-	    ((long)pmp->pfs_clid.time_low);
-	mp->mnt_stat.f_fsid.val[1] = mp->mnt_vfc->vfc_typenum;
+	if (hammer2_getnewfsid(mp)) {
+		hprintf("failed to get new fsid\n");
+		hammer2_unmount_helper(mp, NULL, hmp);
+		hammer2_lk_unlock(&hammer2_mntlk);
+		hammer2_unmount(mp, MNT_FORCE, curproc);
+		return (EINVAL);
+	}
 
 	mp->mnt_stat.f_namemax = HAMMER2_INODE_MAXNAME;
 	mp->mnt_flag |= MNT_LOCAL;

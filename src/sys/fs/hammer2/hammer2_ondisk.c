@@ -767,12 +767,12 @@ hammer2_init_volumes(const hammer2_devvp_list_t *devvpl,
 		    (long long)vol->size);
 	}
 done:
-	if (!error) {
+	if (error == 0) {
 		if (!rootvoldata->version) {
 			hprintf("root volume not found\n");
 			error = EINVAL;
 		}
-		if (!error)
+		if (error == 0)
 			error = hammer2_verify_volumes(volumes, rootvoldata);
 	}
 	hfree(voldata, M_HAMMER2, sizeof(*voldata));

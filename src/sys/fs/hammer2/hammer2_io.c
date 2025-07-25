@@ -70,7 +70,7 @@ hammer2_io_hash_init(hammer2_dev_t *hmp)
 
 	for (i = 0; i < HAMMER2_IOHASH_SIZE; ++i) {
 		hash = &hmp->iohash[i];
-		hammer2_spin_init(&hash->spin, "h2io_hasp");
+		hammer2_spin_init(&hash->spin, "h2dev_io");
 	}
 }
 
@@ -130,7 +130,7 @@ hammer2_io_alloc(hammer2_dev_t *hmp, hammer2_off_t data_off, uint8_t btype,
 		dio->btype = btype;
 		dio->refs = 1;
 		dio->act = 5;
-		hammer2_mtx_init(&dio->lock, "h2io_inplk");
+		hammer2_mtx_init(&dio->lock, "h2io");
 		hammer2_mtx_ex(&dio->lock);
 		xio = hammer2_io_hash_enter(hmp, dio, NULL);
 		if (xio == NULL) {

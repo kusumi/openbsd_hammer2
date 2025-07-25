@@ -1072,6 +1072,7 @@ int hammer2_inode_chain_sync(hammer2_inode_t *);
 int hammer2_inode_chain_ins(hammer2_inode_t *);
 int hammer2_inode_chain_des(hammer2_inode_t *);
 int hammer2_inode_chain_flush(hammer2_inode_t *, int);
+int hammer2_checkpath(const hammer2_inode_t *, hammer2_inode_t *);
 
 /* hammer2_io.c */
 void hammer2_io_hash_init(hammer2_dev_t *);
@@ -1137,6 +1138,9 @@ void hammer2_inc_iostat(hammer2_iostat_t *, int, size_t);
 void hammer2_print_iostat(const hammer2_iostat_t *, const char *);
 int hammer2_signal_check(void);
 const char *hammer2_breftype_to_str(uint8_t);
+uid_t hammer2_inode_to_uid(const hammer2_inode_t *);
+gid_t hammer2_inode_to_gid(const hammer2_inode_t *);
+int hammer2_getnewfsid(struct mount *);
 
 /* hammer2_vfsops.c */
 hammer2_pfs_t *hammer2_pfsalloc(hammer2_chain_t *, const hammer2_inode_data_t *,
@@ -1176,7 +1180,7 @@ void hammer2_xop_bmap(hammer2_xop_t *, void *, int);
 static __inline int
 hammer2_error_to_errno(int error)
 {
-	if (!error)
+	if (error == 0)
 		return (0);
 	else if (error & HAMMER2_ERROR_EIO)
 		return (EIO);
@@ -1287,7 +1291,6 @@ static __inline void
 hammer2_assert_inode_meta(const hammer2_inode_t *ip)
 {
 	KASSERTMSG(ip, "NULL ip");
-	KASSERTMSG(ip->meta.mode, "mode 0");
 	KASSERTMSG(ip->meta.type, "type 0");
 }
 
