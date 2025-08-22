@@ -262,7 +262,7 @@ hammer2_xop_testset_ipdep(hammer2_inode_t *ip)
 again:
 	if (xop_testset_ipdep(ip, ip->ipdep_idx)) {
 		pmp->flags |= HAMMER2_PMPF_WAITING;
-		hammer2_lkc_sleep(cv, mtx, "h2pmp_xop");
+		hammer2_lkc_sleep(cv, mtx, "h2pmp_xop", 0);
 		goto again;
 	}
 	hammer2_lk_unlock(mtx);

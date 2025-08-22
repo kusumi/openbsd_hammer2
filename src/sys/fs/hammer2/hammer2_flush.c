@@ -136,7 +136,7 @@ hammer2_trans_init(hammer2_pfs_t *pmp, uint32_t flags)
 			if (dowait == 0)
 				break;
 			hammer2_lkc_sleep(&pmp->trans_cv, &pmp->trans_lock,
-			    "h2pmp_tr");
+			    "h2pmp_tr", 0);
 			/* retry */
 		} else {
 			cpu_pause();

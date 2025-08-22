@@ -95,6 +95,7 @@ hammer2_lk_destroy(hammer2_lk_t *p __unused)
 {
 }
 
+#ifdef INVARIANTS
 static __inline void
 hammer2_lk_assert_ex(hammer2_lk_t *p)
 {
@@ -106,6 +107,10 @@ hammer2_lk_assert_unlocked(hammer2_lk_t *p)
 {
 	KASSERT(rw_status(p) == 0);
 }
+#else
+#define hammer2_lk_assert_ex(p)		do {} while (0)
+#define hammer2_lk_assert_unlocked(p)	do {} while (0)
+#endif
 
 typedef int hammer2_lkc_t;
 
@@ -119,10 +124,10 @@ hammer2_lkc_destroy(hammer2_lkc_t *c __unused)
 {
 }
 
-static __inline void
-hammer2_lkc_sleep(hammer2_lkc_t *c, hammer2_lk_t *p, const char *s)
+static __inline int
+hammer2_lkc_sleep(hammer2_lkc_t *c, hammer2_lk_t *p, const char *s, int timo)
 {
-	rwsleep(c, p, PCATCH, s, 0);
+	return (rwsleep(c, p, PCATCH, s, timo));
 }
 
 static __inline void
@@ -195,6 +200,7 @@ hammer2_mtx_owned(hammer2_mtx_t *p)
 	return (rrw_status(&p->lock) == RW_WRITE);
 }
 
+#ifdef INVARIANTS
 /* RW_READ doesn't necessarily mean read locked by calling thread. */
 static __inline void
 hammer2_mtx_assert_ex(hammer2_mtx_t *p)
@@ -219,6 +225,12 @@ hammer2_mtx_assert_unlocked(hammer2_mtx_t *p)
 {
 	KASSERT(rrw_status(&p->lock) == 0);
 }
+#else
+#define hammer2_mtx_assert_ex(p)	do {} while (0)
+#define hammer2_mtx_assert_sh(p)	do {} while (0)
+#define hammer2_mtx_assert_locked(p)	do {} while (0)
+#define hammer2_mtx_assert_unlocked(p)	do {} while (0)
+#endif
 
 static __inline int
 hammer2_mtx_ex_try(hammer2_mtx_t *p)
@@ -311,6 +323,7 @@ hammer2_spin_destroy(hammer2_spin_t *p __unused)
 {
 }
 
+#ifdef INVARIANTS
 static __inline void
 hammer2_spin_assert_ex(hammer2_spin_t *p)
 {
@@ -334,6 +347,12 @@ hammer2_spin_assert_unlocked(hammer2_spin_t *p)
 {
 	rw_assert_unlocked(p);
 }
+#else
+#define hammer2_spin_assert_ex(p)	do {} while (0)
+#define hammer2_spin_assert_sh(p)	do {} while (0)
+#define hammer2_spin_assert_locked(p)	do {} while (0)
+#define hammer2_spin_assert_unlocked(p)	do {} while (0)
+#endif
 
 extern struct pool hammer2_pool_inode;
 extern struct pool hammer2_pool_xops;

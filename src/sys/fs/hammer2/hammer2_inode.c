@@ -214,6 +214,7 @@ void
 hammer2_inode_lock(hammer2_inode_t *ip, int how)
 {
 	hammer2_pfs_t *pmp;
+	int error __unused;
 
 	hammer2_inode_ref(ip);
 	pmp = ip->pmp;
@@ -249,8 +250,10 @@ hammer2_inode_lock(hammer2_inode_t *ip, int how)
 			hammer2_spin_unex(&pmp->list_spin);
 			hammer2_mtx_unlock(&ip->lock);
 			/* race window here */
-			tsleep(&ip->flags, 0, "h2sync",
-			    hz / 10 /* 0 in DragonFly */);
+			error = tsleep(&ip->flags, 0, "h2sync",
+			    hz / 100 /* 0 in DragonFly */);
+			debug_hprintf("inum %016llx wokeup error %d\n",
+			    (long long)ip->meta.inum, error);
 			hammer2_mtx_ex(&ip->lock);
 			continue;
 		}
@@ -346,6 +349,8 @@ restart:
 void
 hammer2_inode_unlock(hammer2_inode_t *ip)
 {
+	/* XXX2 DragonFly doesn't take list_spin here */
+	hammer2_spin_ex(&ip->pmp->list_spin);
 	if (ip->flags & HAMMER2_INODE_SYNCQ_WAKEUP) {
 		atomic_clear_int(&ip->flags, HAMMER2_INODE_SYNCQ_WAKEUP);
 		hammer2_mtx_unlock(&ip->lock);
@@ -353,6 +358,7 @@ hammer2_inode_unlock(hammer2_inode_t *ip)
 	} else {
 		hammer2_mtx_unlock(&ip->lock);
 	}
+	hammer2_spin_unex(&ip->pmp->list_spin);
 	hammer2_inode_drop(ip);
 }
 
@@ -567,9 +573,7 @@ hammer2_inode_drop(hammer2_inode_t *ip)
 				hammer2_inode_repoint(ip, NULL);
 				hammer2_mtx_destroy(&ip->lock);
 				hammer2_mtx_destroy(&ip->truncate_lock);
-				hammer2_mtx_destroy(&ip->vhold_lock);
 				hammer2_spin_destroy(&ip->cluster_spin);
-				/* ip->vhold isn't necessarily zero. */
 
 				pool_put(&hammer2_pool_inode, ip);
 				atomic_add_int(&hammer2_count_inode_allocated,
@@ -776,7 +780,6 @@ again:
 	nip->refs = 1;
 	hammer2_mtx_init_recurse(&nip->lock, "h2ip");
 	hammer2_mtx_init(&nip->truncate_lock, "h2ip_tr");
-	hammer2_mtx_init(&nip->vhold_lock, "h2ip_vh");
 	rrw_init_flags(&nip->vnlock, "h2vn_lk", RWL_DUPOK | RWL_IS_VNODE);
 	hammer2_mtx_ex(&nip->lock);
 	TAILQ_INIT(&nip->depend_static.sideq);
@@ -1389,55 +1392,8 @@ hammer2_inode_modify(hammer2_inode_t *ip)
 	atomic_set_int(&ip->flags, HAMMER2_INODE_MODIFIED);
 	/* DragonFly uses DragonFly's vsyncscan specific vsetisdirty() here. */
 
-	hammer2_inode_vhold(ip);
 	if (ip->pmp && (ip->flags & HAMMER2_INODE_NOSIDEQ) == 0)
 		hammer2_inode_delayed_sideq(ip);
-}
-
-/*
- * This function was originally required by NetBSD VFS sync.
- * This doesn't exist in DragonFly HAMMER2.
- */
-void
-hammer2_inode_vhold(hammer2_inode_t *ip)
-{
-	KKASSERT(ip->refs > 0);
-	KKASSERT(ip->vhold >= 0);
-
-	/* ip->vp can still be NULL on inode creation. */
-	if (ip->vp) {
-		hammer2_mtx_ex(&ip->vhold_lock);
-		if (ip->vhold == 0) { /* optimization */
-			vref(ip->vp);
-			ip->vhold++;
-		}
-		KKASSERT(ip->vhold > 0);
-		hammer2_mtx_unlock(&ip->vhold_lock);
-	}
-}
-
-/*
- * This function was originally required by NetBSD VFS sync.
- * This doesn't exist in DragonFly HAMMER2.
- */
-void
-hammer2_inode_vdrop(hammer2_inode_t *ip, int n)
-{
-	KKASSERT(ip->refs > 0);
-	KKASSERT(ip->vhold >= 0);
-	KKASSERT(ip->vp);
-
-	if (n > ip->vhold)
-		hpanic("arg %d > vhold %d", n, ip->vhold);
-
-	hammer2_mtx_ex(&ip->vhold_lock);
-	while (n > 0) {
-		vrele(ip->vp);
-		ip->vhold--;
-		n--;
-	}
-	KKASSERT(ip->vhold >= 0);
-	hammer2_mtx_unlock(&ip->vhold_lock);
 }
 
 /*

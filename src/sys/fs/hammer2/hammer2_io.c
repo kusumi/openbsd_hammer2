@@ -378,7 +378,10 @@ hammer2_io_data(hammer2_io_t *dio, hammer2_off_t lbase)
 	lbase -= dio->dbase;
 	b_offset = (off_t)bp->b_lblkno * DEV_BSIZE;
 	off = (lbase & ~HAMMER2_OFF_MASK_RADIX) - b_offset;
-	KASSERTMSG(off >= 0 && off < bp->b_bufsize, "bad offset");
+
+	KASSERTMSG(off >= 0, "bad offset not 0x%x >= 0x%x", off, 0);
+	KASSERTMSG(off < bp->b_bufsize, "bad offset not 0x%x < 0x%lx",
+	    off, bp->b_bufsize);
 
 	return (bp->b_data + off);
 }

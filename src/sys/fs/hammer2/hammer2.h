@@ -446,7 +446,6 @@ struct hammer2_inode {
 	hammer2_depend_t	depend_static;	/* (in-place allocation) */
 	hammer2_mtx_t		lock;		/* inode lock */
 	hammer2_mtx_t		truncate_lock;	/* prevent truncates */
-	hammer2_mtx_t		vhold_lock;
 	struct rrwlock		vnlock;		/* OpenBSD: vnode lock */
 	hammer2_spin_t		cluster_spin;	/* update cluster */
 	hammer2_cluster_t	cluster;
@@ -460,7 +459,6 @@ struct hammer2_inode {
 	unsigned int		flags;		/* for HAMMER2_INODE_xxx */
 	uint8_t			comp_heuristic;
 	int			ipdep_idx;
-	int			vhold;
 	int			in_seek;	/* FIOSEEKXXX */
 };
 
@@ -1066,8 +1064,6 @@ hammer2_key_t hammer2_inode_data_count(const hammer2_inode_t *);
 hammer2_key_t hammer2_inode_inode_count(const hammer2_inode_t *);
 int hammer2_inode_unlink_finisher(hammer2_inode_t *, struct vnode **);
 void hammer2_inode_modify(hammer2_inode_t *);
-void hammer2_inode_vhold(hammer2_inode_t *);
-void hammer2_inode_vdrop(hammer2_inode_t *, int);
 int hammer2_inode_chain_sync(hammer2_inode_t *);
 int hammer2_inode_chain_ins(hammer2_inode_t *);
 int hammer2_inode_chain_des(hammer2_inode_t *);

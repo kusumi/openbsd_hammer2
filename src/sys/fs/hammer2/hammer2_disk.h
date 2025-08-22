@@ -801,6 +801,8 @@ typedef struct hammer2_bmap_data hammer2_bmap_data_t;
 
 #define HAMMER2_INODE_START		1024	/* dynamically allocated */
 
+#define HAMMER2_LINK_MAX		UINT32_MAX	/* FreeBSD */
+
 struct hammer2_inode_meta {
 	uint16_t	version;	/* 0000 inode data version */
 	uint8_t		reserved02;	/* 0002 */

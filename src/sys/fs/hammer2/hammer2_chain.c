@@ -836,7 +836,8 @@ hammer2_chain_load_data(hammer2_chain_t *chain)
 again:
 	if (chain->flags & HAMMER2_CHAIN_IOINPROG) {
 		atomic_set_int(&chain->flags, HAMMER2_CHAIN_IOSIGNAL);
-		hammer2_lkc_sleep(&chain->inp_cv, &chain->inp_lock, "h2ch_inp");
+		hammer2_lkc_sleep(&chain->inp_cv, &chain->inp_lock, "h2ch_inp",
+		    0);
 		goto again;
 	}
 	atomic_set_int(&chain->flags, HAMMER2_CHAIN_IOINPROG);
